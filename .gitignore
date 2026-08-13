@@ -20,6 +20,9 @@ __pycache__/
 *.db-wal
 out/
 out_test/
+# scamscan exports contain data about identifiable people
+queue.csv
+*.csv
 
 # macOS
 .DS_Store

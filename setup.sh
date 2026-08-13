@@ -25,7 +25,7 @@ echo "==> Installing dependencies"
 
 echo "==> Running tests (no network or API key needed)"
 fail=0
-for t in smoke_test sweep_test web_test; do
+for t in smoke_test sweep_test web_test scamscan_test; do
   if ./.venv/bin/python "$t.py" > "/tmp/wt-$t.log" 2>&1; then
     printf "    %-12s %s\n" "$t" "$(grep -c PASS "/tmp/wt-$t.log") checks passed"
   else

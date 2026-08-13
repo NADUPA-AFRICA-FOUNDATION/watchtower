@@ -1,0 +1,67 @@
+{
+  "brand": {
+    "name": "M-PESA",
+    "aliases": ["mpesa", "m-pesa", "m pesa", "safaricom mpesa"],
+    "official_domains": ["safaricom.co.ke", "m-pesa.co.ke", "vodacom.co.tz"],
+    "official_handles": ["safaricomplc", "safaricom_care", "mpesaafrica"],
+    "markets": ["Kenya", "Tanzania", "Lesotho"]
+  },
+
+  "seed_topics": [
+    "fake agent or till impersonating the brand",
+    "investment or forex scheme promising guaranteed returns paid via the brand",
+    "instant loan app demanding an upfront processing fee",
+    "reversal or refund scam claiming money was sent by mistake",
+    "phishing page asking for PIN, OTP or full ID number",
+    "SIM swap or account unlock service sold informally"
+  ],
+
+  "lexicon": {
+    "en": {
+      "guaranteed returns": 22, "double your money": 30, "no risk": 14,
+      "send your pin": 40, "share the code": 32, "otp": 18,
+      "processing fee": 24, "activation fee": 26, "unlock your account": 24,
+      "limited slots": 12, "act now": 10, "verified agent": 20,
+      "sim swap": 26, "reversal": 14, "sent by mistake": 22
+    },
+    "sw": {
+      "tuma pesa": 16, "faida ya uhakika": 28, "hela mkononi": 14,
+      "usiogope": 8, "ada ya usajili": 24, "namba ya siri": 40,
+      "nitumie code": 32, "mkopo papo hapo": 18, "nafasi chache": 12
+    },
+    "sheng": {
+      "doo": 8, "mullah": 10, "chapaa": 8, "biz ya haraka": 18,
+      "form ni": 10, "unaeza doublisha": 30, "hela ya haraka": 16
+    }
+  },
+
+  "scoring": {
+    "weights": {
+      "lexicon": 1.0,
+      "artifact": 1.0,
+      "impersonation": 1.0,
+      "model": 1.0
+    },
+    "artifact_points": {
+      "msisdn": 12, "paybill": 20, "till": 20, "whatsapp": 22,
+      "telegram": 14, "crypto": 26, "shortlink": 10, "pin_request": 40
+    },
+    "review_threshold": 45,
+    "auto_escalate_threshold": 80
+  },
+
+  "search": {
+    "model": "claude-sonnet-4-6",
+    "expansion_model": "claude-sonnet-4-6",
+    "max_uses_per_query": 4,
+    "queries_per_topic": 3,
+    "user_location": {
+      "type": "approximate",
+      "city": "Nairobi",
+      "region": "Nairobi County",
+      "country": "KE",
+      "timezone": "Africa/Nairobi"
+    },
+    "blocked_domains": ["safaricom.co.ke", "m-pesa.co.ke"]
+  }
+}

@@ -4,37 +4,62 @@ Context for Claude Code sessions in this repo. Read this before changing anythin
 
 ## What this is
 
-A monitoring tool for open-source research. Type a keyword, get ranked findings
-from news, regulatory sources, social and sanctions lists. Two front doors: a web
-UI and a CLI. Same pipeline behind both.
+**Two separate tools in one repo.** They share the Python environment, the
+`.env`, and the house style — nothing else. No shared imports, no shared
+database, no shared config. Read the section for the one you're working on.
 
-Built for AML/CFT compliance research (adverse media, regulatory change tracking,
-entity screening), but nothing in the code is compliance-specific.
+| | **watchtower** | **scamscan** |
+|---|---|---|
+| Question | "what is being said about X?" | "who is running scams against brand X?" |
+| Entry | `run.py` (+ web UI) | `scamscan.py` |
+| Config | `config.yaml` | `config.json` |
+| Store | `watchtower.db` | `scamscan.db` |
+| Docs | `README.md` | `SCAMSCAN.md` |
+| Tests | `smoke_test.py`, `sweep_test.py`, `web_test.py` | `scamscan_test.py` |
+| Search | 13 backends in `core/sources.py` | Claude's server-side web search |
+
+**watchtower** — a monitoring tool for open-source research. Type a keyword, get
+ranked findings from news, regulatory sources, social and sanctions lists. Two
+front doors: a web UI and a CLI. Same pipeline behind both. Built for AML/CFT
+compliance research (adverse media, regulatory change tracking, entity
+screening), but nothing in the code is compliance-specific.
+
+**scamscan** — keyword-driven scam discovery. Claude proposes candidate pages
+via server-side web search; local Python code scores them across four
+independent families (lexicon, artifact, impersonation, model confidence).
+See `## scamscan` below for its own invariants.
 
 ## Commands
 
 ```bash
 pip install -r requirements.txt
 
+# watchtower
 python run.py serve                          # web UI, localhost:8000
 python run.py sweep "query" --hours 168      # CLI sweep
 python run.py run                            # scheduled mode: collect+enrich+alert
 python run.py search "kenya AND fraud"       # FTS5 over the archive
 python run.py sources                        # list backends
 python run.py stats
+python diagnose.py                           # why did every source return zero?
 
-python smoke_test.py     # store, dedupe, FTS5, alerts
-python sweep_test.py     # backends, ranking, renderers, concurrency
-python web_test.py       # endpoints, SSE, frontend wiring
+# scamscan  (costs money per run — start with one topic)
+python scamscan.py hunt --config config.json --topics 1
+python scamscan.py queue --min-score 45
+python scamscan.py test "<text>" --url <url>   # offline scoring, no API calls
 
-python diagnose.py       # hit every real endpoint, report why each one failed
+# tests — all four, no network, no API key, seconds
+python smoke_test.py     # watchtower: store, dedupe, FTS5, alerts
+python sweep_test.py     # watchtower: backends, ranking, renderers, concurrency
+python web_test.py       # watchtower: endpoints, SSE, frontend wiring
+python scamscan_test.py  # scamscan: scoring, dedupe, silent-failure detection
 ```
 
 Each suite prints its own total; don't hardcode the counts here, they drift.
 `diagnose.py` is the first thing to run when a sweep comes back empty — it
 reports the actual HTTP status and robots verdict per endpoint.
 
-**Run all three tests after any change.** They use `httpx.MockTransport`, so
+**Run all four tests after any change.** They use `httpx.MockTransport`, so
 they need no network and no API key, and they finish in seconds. If you change
 an SSE event name, a CSS class the JS applies, or an element ID, `web_test.py`
 catches it — that's what its frontend-wiring section is for.
@@ -56,6 +81,15 @@ adapters/      rss, gdelt, webpage, social — for scheduled mode
 web/
   app.py       FastAPI, SSE streaming
   static/      index.html, style.css, app.js — no build step, no framework
+```
+
+scamscan is deliberately flat — one file, no package. It shares nothing with
+`core/` and must not import from it:
+
+```
+scamscan.py       artifacts, impersonation, lexicon, scoring, store, CLI
+config.json       brand, seed topics, lexicon, weights, search settings
+scamscan_test.py  offline; no network, no API key
 ```
 
 ## Decisions that should not be reversed without a reason
@@ -214,6 +248,60 @@ and that a finished sweep does not silently re-run.
 - `adapters/webpage.py` records PDF links but doesn't read them, and regulator
   circulars are usually PDFs. `pypdf` is already listed as an optional dep.
 - `config.yaml` ships with a placeholder regulator URL.
+
+## scamscan
+
+`scamscan.py` + `config.json` + `scamscan_test.py`. Docs in `SCAMSCAN.md`.
+Costs real money on every run (web search is billed separately from tokens, at
+roughly $10 per 1,000 searches) — `--topics 1` first, always.
+
+**The model proposes; local code decides.** Anything that drives analyst
+workload is computed in auditable Python, never inside a prompt. Claude returns
+candidate pages and a confidence; `score_finding` does the scoring. Keep it that
+way — a score you cannot reproduce offline is a score you cannot defend.
+
+**A query that never ran must never look like a query that found nothing.**
+This inverts watchtower's bias: there, a zero is boring; here, an empty queue is
+read as "this brand is clean", so a silent failure is a false negative someone
+acts on. Three failure modes all return a successful HTTP 200 and would
+otherwise parse to `[]`:
+
+- **Web search errors** arrive as a `web_search_tool_result` block whose
+  `content` is an error object rather than a list of results. Nothing raises.
+  `search_failures()` detects them; `hunt_query` raises `HuntError`.
+- **`stop_reason: "refusal"`** — these prompts describe fraud bait copy on
+  purpose, so a safety decline is plausible. Checked before the response is
+  parsed.
+- **`stop_reason: "pause_turn"`** — the server-side tool loop hit its iteration
+  cap. Results are real but partial, and the run says so.
+
+`cmd_hunt` collects every failure and prints an `INCOMPLETE RUN` block. If you
+add a code path that can return no findings, it goes through `HuntError` too.
+
+**Absent ≠ zero in scoring.** `score_finding` averages only the families that
+actually reported. Treating a missing `model_confidence` as `0.0` was a flat
+25-point penalty that pushed genuine escalations under
+`auto_escalate_threshold`. An explicit `0.0` still counts; an absent field is
+excluded and recorded in `scored_on`.
+
+**Dedupe keeps cross-site duplicates.** Same site + same copy collapses and
+increments `times_seen`; the *same copy on a different site* stays separate on
+purpose — cross-site reuse is the coordination signal, not noise.
+
+**Page content is untrusted data.** The hunt prompt says so explicitly, and
+scoring never executes anything from a page. If a page contains text addressed
+to the model, that is reported as evidence, not followed. Never let extracted
+content reach a shell, a SQL string, or a follow-up prompt as an instruction.
+
+**Exports are personal data.** `queue.csv` and `*.csv` are gitignored. The
+compliance section in `SCAMSCAN.md` is not boilerplate — confirm lawful basis,
+retention, and access before running this against live traffic.
+
+Known gaps: `web_search_20250305` is the older tool version (`_20260209` adds
+dynamic filtering — better accuracy, fewer tokens); `parse_json_array` scrapes
+JSON out of free text where structured outputs would guarantee it (both models
+support it — needs a live test that it composes with server-side search); the
+lexicon ships as a placeholder and must be rebuilt from real reported cases.
 
 ## Deployment
 
