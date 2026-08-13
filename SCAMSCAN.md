@@ -25,15 +25,20 @@ python scamscan.py hunt --config config.json --topics 1   # start with one topic
 | `export --out queue.csv` | Dump everything to CSV |
 | `dispose <fingerprint> confirmed\|false_positive\|unclear\|escalated` | Record an analyst verdict |
 | `test "<text>" --url <url>` | Score sample text offline, no API calls |
+| `selftest` | Lint the schemas, show which search tool the model gets, audit lexicon provenance |
+| `selftest --live` | Prove structured outputs composes with server-side search (~1 search) |
 
 Use `test` heavily before your first real run. It costs nothing and it is how you
-tune weights against examples you already know the answer to.
+tune weights against examples you already know the answer to. Run `selftest`
+after any config edit — it catches a schema or model mistake before you pay for
+a search that then 400s.
 
 ## How scoring works
 
 Four independent families, each 0-100, averaged with configurable weights:
 
-- **lexicon** — weighted term hits across English, Kiswahili and Sheng
+- **lexicon** — weighted term hits across English, Kiswahili and Sheng, minus
+  counter terms
 - **artifact** — extracted phone numbers, paybills, tills, WhatsApp/Telegram
   links, crypto addresses, shortlinks, and explicit PIN/OTP requests
 - **impersonation** — host similarity to official domains after NFKD
@@ -44,6 +49,73 @@ Four independent families, each 0-100, averaged with configurable weights:
 
 Change `scoring.weights` in `config.json` to shift the balance. Drop `model` to
 0 if you want a fully deterministic pass.
+
+### The lexicon
+
+Every term carries `[weight, "SOURCE"]`, and the source travels with the hit
+into the score breakdown. A term you cannot trace to a published case is a term
+you cannot defend when an analyst asks why a page was escalated, so `selftest`
+reports how many terms are unsourced or `UNVERIFIED`.
+
+| Source | What it is |
+|---|---|
+| `COMPASS2025` | Doğan, Gilbert & Kotut, *Easy Come, Easy Go: Phone Enabled Small-Scale Financial Grift*, ACM COMPASS '25 ([doi:10.1145/3715335.3736315](https://doi.org/10.1145/3715335.3736315)) — 73 Kenyan M-PESA users, 89 scams, with verbatim message samples |
+| `SAFARICOM` | Safaricom fraud-awareness advisories and the 2026 M-PESA prompt alert |
+| `CMA_CBK` | Capital Markets Authority / Central Bank of Kenya investor alerts |
+| `DCI` | Directorate of Criminal Investigations recruitment- and investment-fraud warnings |
+| `PRESS` | Kenyan press and Africa Check fact-checks reproducing scam SMS verbatim |
+| `UNVERIFIED` | plausible, not traced to a published case. Low weights — replace from your own confirmed reports first |
+
+Two things changed with the terms, and both are load-bearing:
+
+**Matching is on word boundaries.** `term in text` was fine for invented terms
+because they were long and distinctive. Real ones are not — `otp` fires inside
+"adoption", `reversal` inside "irreversible", `act now` inside "contact
+nowhere". A real lexicon on a substring matcher is a scoring family made mostly
+of noise.
+
+**Counter terms subtract.** The bait and the warning about the bait use the same
+words: Safaricom's own advisory says "never share your PIN" and quotes the SMS
+verbatim, and so does every news explainer. Without a subtraction the best page
+written about a scam scores like the scam. Edit `counter_terms` in
+`config.json`; they apply before the 0-100 clamp and the score never goes
+negative.
+
+The Sheng bucket is deliberately thin. Published fraud reporting quotes English
+and Kiswahili, so the bare money nouns that used to sit here (`doo`, `chapaa`,
+`mullah`) were removed — they mean "money" and carry no fraud signal. What
+remains carries intent (`doublisha`) and is marked `UNVERIFIED`. This is the
+bucket to build from your own case files.
+
+## Structured outputs and the search tool
+
+`hunt` sends `output_config.format` with a JSON schema, so the response shape is
+enforced by the API rather than regex-scraped out of model prose. Two
+consequences worth knowing:
+
+- **`model_confidence` is `required` in the schema**, which removes the omission
+  that used to cost a finding 25 points. The renormalisation in `score_finding`
+  stays anyway — the offline `test` command and the text fallback below can
+  still omit it, and a guarantee at one layer is not a reason to delete the
+  defence at another.
+- **A parse failure now raises.** Under a schema the API guarantees valid JSON
+  matching it, so a failed parse is a broken contract, not prose to salvage.
+  Salvaging it would produce `[]`, which reads as "searched, found nothing".
+
+The API docs do not state whether `output_config.format` composes with a
+server-side tool. Rather than assume, the run finds out: a 400 that names
+`output_config`, `json_schema` or `output format` downgrades to text parsing for
+the rest of the run, prints the reason, and repeats it in the closing summary.
+Any other 400 — a credit-balance error, a bad model — propagates untouched.
+`selftest --live` answers the question directly in two calls, one structured
+without tools and one with web search.
+
+The web search tool version follows the model. `web_search_20260209` adds
+dynamic filtering, where Claude filters results in a code sandbox before they
+reach the context window — better accuracy, fewer tokens — and exists only on
+Opus 5/4.8/4.7/4.6, Sonnet 5, Sonnet 4.6 and Fable 5. On anything else the run
+uses `web_search_20250305` and says so, rather than 400ing on every query.
+`search.web_search_tool_version` pins it if you need to.
 
 ## Cost
 
@@ -75,8 +147,15 @@ shell, a SQL string, or a follow-up prompt as an instruction.
   lookalike domains days earlier and costs nothing.
 - Kenyan phone patterns are hardcoded in `ARTIFACT_PATTERNS`. Add Tanzania
   (+255) and Lesotho (+266) before running those markets.
-- The lexicon shipped here is a placeholder. Rebuild it from real reported cases;
-  invented terms will underperform badly.
+- The lexicon is built from Kenyan sources, so it is a Kenya lexicon. Tanzania
+  and Lesotho need their own terms and their own citations.
+- The artifact family has the substring problem the lexicon just lost:
+  `pin_request` fires on an advisory that says "never share your PIN". The
+  impersonation hard-zero on official domains covers the common case, but a
+  lookalike domain hosting copied advisory text still scores.
+- Counter terms are a blunt instrument — they subtract wherever they appear, not
+  only where they signal commentary. Check `lexicon_hits` in the breakdown when
+  a score looks wrong.
 
 ## Compliance
 

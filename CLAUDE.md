@@ -47,12 +47,14 @@ python diagnose.py                           # why did every source return zero?
 python scamscan.py hunt --config config.json --topics 1
 python scamscan.py queue --min-score 45
 python scamscan.py test "<text>" --url <url>   # offline scoring, no API calls
+python scamscan.py selftest                    # schema lint, tool version, lexicon audit
+python scamscan.py selftest --live             # ~1 search: does the schema survive web search?
 
 # tests — all four, no network, no API key, seconds
 python smoke_test.py     # watchtower: store, dedupe, FTS5, alerts
 python sweep_test.py     # watchtower: backends, ranking, renderers, concurrency
 python web_test.py       # watchtower: endpoints, SSE, frontend wiring
-python scamscan_test.py  # scamscan: scoring, dedupe, silent-failure detection
+python scamscan_test.py  # scamscan: scoring, lexicon, schemas, silent-failure detection
 ```
 
 Each suite prints its own total; don't hardcode the counts here, they drift.
@@ -297,11 +299,39 @@ content reach a shell, a SQL string, or a follow-up prompt as an instruction.
 compliance section in `SCAMSCAN.md` is not boilerplate — confirm lawful basis,
 retention, and access before running this against live traffic.
 
-Known gaps: `web_search_20250305` is the older tool version (`_20260209` adds
-dynamic filtering — better accuracy, fewer tokens); `parse_json_array` scrapes
-JSON out of free text where structured outputs would guarantee it (both models
-support it — needs a live test that it composes with server-side search); the
-lexicon ships as a placeholder and must be rebuilt from real reported cases.
+**The response shape is enforced by the API, not by prompt begging.** `hunt` and
+`expand_queries` send `output_config.format` with a JSON schema
+(`FINDINGS_SCHEMA`, `QUERIES_SCHEMA`). Under a schema a parse failure raises
+`HuntError` — the API guarantees conforming JSON, so a failed parse is a broken
+contract, and salvaging it would yield `[]`, which reads as a clean brand. The
+docs do not say whether this composes with a *server-side* tool, so the run finds
+out: `structured_rejected()` matches only a 400 naming `output_config`,
+`json_schema` or `output format`, downgrades to `parse_payload(strict=False)` for
+the rest of the run, and prints it twice — inline and in the closing summary.
+Every other 400 propagates. Do not widen that matcher; a credit-balance 400
+silently downgrading the run is precisely the failure this tool exists to catch.
+`selftest --live` settles the question in two calls.
+
+**The web search tool version is derived from the model, never hardcoded.**
+`web_search_20260209` (dynamic filtering — Claude filters results in a sandbox
+before they reach the context) only exists on the families in
+`DYNAMIC_FILTERING_MODELS`. Elsewhere `web_search_tool()` returns
+`web_search_20250305` and names the reason, so switching to a cheaper model
+degrades instead of 400ing on every query.
+
+**Lexicon terms carry provenance and match on word boundaries.** Entries are
+`[weight, "SOURCE"]`; the source rides into `lexicon_hits` so a score can be
+defended. `term_pattern` asserts `\b` only where the term's own edge is a word
+character (`*locked*` has none) and turns internal spaces into `\s+`. Substring
+matching was survivable with invented terms and is not with real ones — `otp`
+inside "adoption", `reversal` inside "irreversible". `counter_terms` subtract
+before the clamp, because an advisory quotes the bait verbatim and would
+otherwise score like it. Bare-number entries still parse, so older configs work.
+
+Known gaps: the lexicon is Kenyan, so Tanzania and Lesotho are uncovered; the
+Sheng bucket is thin and `UNVERIFIED` because published reporting quotes English
+and Kiswahili; `ARTIFACT_PATTERNS` still substring-matches, so `pin_request`
+fires on "never share your PIN".
 
 ## Deployment
 
