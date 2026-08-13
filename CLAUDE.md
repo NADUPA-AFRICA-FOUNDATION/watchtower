@@ -134,6 +134,23 @@ nothing crashes, so the tool stays testable and demoable without any key.
 **Source diversity cap of 3 per domain** in `sweep.py::_diversify`. Without it,
 wire copy fills the entire first page.
 
+**Scores are adjusted after ranking, in `sweep.py::_adjust`,** for both keyword
+and model scores. Three inputs the scorer itself cannot see:
+
+- *Corroboration.* Dedupe collapses a syndicated story into one row; the number
+  of distinct domains that carried it is kept in `raw_meta["corroboration"]`
+  and adds up to +18. The model scores each item alone and cannot know five
+  outlets ran it. Additive and capped on purpose — it should promote a
+  well-attested story over an equally relevant single-sourced one, never
+  rescue an irrelevant one.
+- *Source tier* (`SOURCE_TIER`): watchlist > regulatory > dataset > news >
+  reference > social. A regulator's circular and a content farm are not equally
+  good evidence. A multiplier, so it breaks ties rather than inventing
+  relevance.
+- *Headline-only penalty.* An item with under 200 characters of body was never
+  read, so it is capped at 55 and flagged in the UI. A matching headline means
+  the words appeared, not that the piece is about your query.
+
 ## Conventions
 
 Adding a sweep source: one function in `core/sources.py` with signature

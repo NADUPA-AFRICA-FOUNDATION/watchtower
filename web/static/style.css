@@ -388,6 +388,29 @@ main { max-width: 1080px; margin: 0 auto; padding: 32px 24px 80px; }
   min-width: 22px;
 }
 
+/* Corroboration is evidence strength, so it earns the band colour. */
+.corrob {
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: .04em;
+  color: var(--band);
+  border: 1px solid currentColor;
+  border-radius: 2px;
+  padding: 0 5px;
+  cursor: help;
+}
+/* A caveat, not a finding — stays grey so it can't be mistaken for signal. */
+.flag {
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: .04em;
+  color: var(--faint);
+  border: 1px dashed var(--rule);
+  border-radius: 2px;
+  padding: 0 5px;
+  cursor: help;
+}
+
 .card h3 { margin: 0; font-size: 15.5px; font-weight: 600; line-height: 1.35;
   overflow-wrap: anywhere; }
 .card h3 a { color: var(--ink); text-decoration: none; }

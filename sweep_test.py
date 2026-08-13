@@ -160,6 +160,42 @@ def main():
     ok &= check("relevant outranks irrelevant",
                 _keyword_score(hit, terms) > _keyword_score(miss, terms))
 
+    print("\nscoring: corroboration, source tier, headline penalty")
+    from core.sweep import _adjust, _headline_only
+
+    def mk(stype, text="beneficial ownership Kenya rules " * 20, **meta):
+        return Item(url="https://x.example/1", source="s", source_type=stype,
+                    title="Beneficial ownership Kenya", text=text,
+                    raw_meta={"corroboration": 1, **meta})
+
+    news = mk("news")
+    ok &= check("a lone news item is scored as-is",
+                _adjust(50, news) == 50)
+    ok &= check("five outlets carrying it outranks one",
+                _adjust(50, mk("news", corroboration=5)) > _adjust(50, news))
+    ok &= check("corroboration is capped, not unbounded",
+                _adjust(50, mk("news", corroboration=99))
+                == _adjust(50, mk("news", corroboration=4)))
+    ok &= check("a regulator outranks a news item at equal relevance",
+                _adjust(50, mk("regulatory")) > _adjust(50, news))
+    ok &= check("a social post ranks below a news item",
+                _adjust(50, mk("social")) < _adjust(50, news))
+    ok &= check("a sanctions listing outranks everything at equal relevance",
+                _adjust(50, mk("watchlist")) > _adjust(50, mk("regulatory")))
+
+    bare = mk("news", text="short")
+    ok &= check("a bodyless item is recognised as headline-only",
+                _headline_only(bare))
+    ok &= check("a headline alone cannot reach the HIGH band",
+                _adjust(95, mk("news", text="short")) < 80)
+    ok &= check("and is flagged for the UI",
+                mk("news", text="short").raw_meta.get("corroboration") == 1
+                and (_adjust(95, bare) or True)
+                and bare.raw_meta.get("headline_only") is True)
+    ok &= check("a read article is not penalised", not _headline_only(news))
+    ok &= check("scores stay inside 0-100",
+                0 <= _adjust(99, mk("watchlist", corroboration=9)) <= 100)
+
     print("\ndiversification")
     many = [Item(url=f"https://same.com/{i}", source="s", source_type="news",
                  raw_meta={"domain": "same.com"}) for i in range(5)]

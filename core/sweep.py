@@ -78,6 +78,57 @@ def _keyword_score(item: Item, terms: list[str]) -> int:
     return min(100, int((covered / len(terms)) * 60 + min(weighted, 20) * 2))
 
 
+def _domain_of(item: Item) -> str:
+    d = item.raw_meta.get("domain")
+    if d:
+        return str(d).lower()
+    parts = item.url.split("/")
+    return parts[2].lower() if len(parts) > 2 else ""
+
+
+# A regulator's own circular and a content farm are not equally good evidence.
+# Multiplied into the keyword score, so a primary source has to be roughly as
+# on-topic as an aggregator to outrank it — this tilts ties, it doesn't
+# manufacture relevance out of nothing.
+SOURCE_TIER = {
+    "watchlist": 1.30,     # opensanctions — a listing is a fact, not a claim
+    "regulatory": 1.25,    # sec_edgar, regulator pages
+    "dataset": 1.15,       # gleif, opencorporates — registry records
+    "news": 1.00,
+    "reference": 0.85,     # wikipedia: useful background, rarely the finding
+    "social": 0.75,        # mastodon, bluesky, reddit, hn, x — a lead, not proof
+}
+
+
+def _headline_only(item: Item) -> bool:
+    """No body worth scoring — a title and little else.
+
+    GDELT with fetch_body=False returns headlines. Scoring those as though the
+    article had been read overstates them: a matching headline says the words
+    appeared, not that the piece is about your query.
+    """
+    return len(item.text.strip()) < 200
+
+
+def _adjust(score: int, item: Item) -> int:
+    """Apply source tier, corroboration and headline penalty to a raw score."""
+    adjusted = score * SOURCE_TIER.get(item.source_type, 1.0)
+
+    # Corroboration: +6 per extra independent domain, capped. Deliberately
+    # additive and small — it should promote a well-attested story over an
+    # equally-relevant single-source one, not rescue an irrelevant one.
+    extra = max(0, int(item.raw_meta.get("corroboration", 1)) - 1)
+    adjusted += min(extra * 6, 18)
+
+    if _headline_only(item):
+        # Cap rather than scale: an unread headline should not reach the top
+        # band on keyword overlap alone.
+        adjusted = min(adjusted * 0.8, 55)
+        item.raw_meta["headline_only"] = True
+
+    return max(0, min(100, int(round(adjusted))))
+
+
 def _diversify(items: list[Item], cap_per_domain: int = 3) -> list[Item]:
     """Stop one prolific outlet burying everything else. Syndicated wire copy
     means a single story can occupy your entire top ten otherwise."""
@@ -187,15 +238,32 @@ def sweep(query: str, fetcher: Fetcher, hours: int = 72,
     if not collected:
         return result
 
-    # --- 2. dedupe ----------------------------------------------------
+    # --- 2. dedupe, keeping the corroboration ---------------------------
+    # Collapsing five outlets into one row is right; throwing away the fact
+    # that five independent outlets carried it is not. The number of distinct
+    # domains reporting a story is the cheapest strong signal that it is real,
+    # and it costs nothing — we already have the duplicates in hand.
     by_hash: dict[str, Item] = {}
+    domains_by_hash: dict[str, set] = {}
+    sources_by_hash: dict[str, set] = {}
     for item in collected:
-        existing = by_hash.get(item.content_hash)
+        h = item.content_hash
+        domains_by_hash.setdefault(h, set()).add(_domain_of(item))
+        sources_by_hash.setdefault(h, set()).add(item.source)
+        existing = by_hash.get(h)
         if existing is None:
-            by_hash[item.content_hash] = item
+            by_hash[h] = item
         elif len(item.text) > len(existing.text):
-            by_hash[item.content_hash] = item      # keep the fuller copy
+            by_hash[h] = item                      # keep the fuller copy
+
     deduped = list(by_hash.values())
+    for item in deduped:
+        h = item.content_hash
+        domains = sorted(d for d in domains_by_hash.get(h, set()) if d)
+        item.raw_meta["corroboration"] = len(domains)
+        item.raw_meta["corroborating_domains"] = domains[:8]
+        item.raw_meta["corroborating_sources"] = sorted(sources_by_hash.get(h, set()))
+
     progress({"type": "stage", "stage": "dedupe",
               "before": len(collected), "after": len(deduped)})
 
@@ -236,7 +304,7 @@ def sweep(query: str, fetcher: Fetcher, hours: int = 72,
     # the plausible candidates. This is what keeps a sweep affordable.
     for item in deduped:
         if not item.enriched:
-            item.relevance = _keyword_score(item, terms)
+            item.relevance = _adjust(_keyword_score(item, terms), item)
     deduped.sort(key=lambda i: -i.relevance)
 
     if enricher and enricher.enabled:
@@ -270,6 +338,12 @@ def sweep(query: str, fetcher: Fetcher, hours: int = 72,
         # still rendered as "N scored 60+" — a keyword ranking wearing the
         # model's credibility, which is the worst way for this to fail.
         result.enriched = scored_any
+        # The model scores each item alone, so it cannot see that five outlets
+        # carried the same story or that this one came from a regulator. Fold
+        # those in afterwards rather than trying to explain them in a prompt.
+        for item in candidates:
+            if item.enriched:
+                item.relevance = _adjust(item.relevance, item)
 
     # --- 5. rank and roll up -------------------------------------------
     deduped.sort(key=lambda i: (-i.relevance, i.published_at), reverse=False)

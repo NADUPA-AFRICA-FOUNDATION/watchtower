@@ -229,6 +229,21 @@ function card(item) {
   h.append(a);
   c.append(h);
 
+  // How many independent domains carried this story. The cheapest strong
+  // signal that something is real, and it would otherwise be thrown away by
+  // dedupe — so it gets its own badge rather than hiding in the metadata line.
+  const corroboration = item.raw_meta?.corroboration || 1;
+  if (corroboration > 1) {
+    const c = el("span", "corrob", `${corroboration} sources`);
+    c.title = (item.raw_meta.corroborating_domains || []).join("\n");
+    top.append(c);
+  }
+  if (item.raw_meta?.headline_only) {
+    const h = el("span", "flag", "headline only");
+    h.title = "No article body was read — scored on the headline alone.";
+    top.append(h);
+  }
+
   const meta = el("p", "card-meta");
   meta.append(el("span", null, item.source));
   if (item.published_at) meta.append(el("span", null, item.published_at.slice(0, 16)));
