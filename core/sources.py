@@ -4,20 +4,34 @@ Every backend here takes a query string and returns list[Item]. All of them are
 public APIs or published feeds, so there's no ToS grey area and nothing to
 maintain when a site redesigns.
 
-  gdelt      global news, all languages, 15-min lag, back to 2017
-  google_news  broad news via the published RSS search endpoint
-  wikipedia  entity background and disambiguation
-  hackernews via Algolia's public API; good for tech and fintech chatter
-  mastodon   public post search on any instance that allows it
-  sec_edgar  US filings full-text, useful for company checks
-  opensanctions  sanctions/PEP/watchlist matching (needs a free key)
+  gdelt          global news, all languages, 15-min lag, back to 2017
+  google_news    broad news via the published RSS search endpoint
+  web_search     the whole indexed web, via Brave       (BRAVE_API_KEY)
+  wikipedia      entity background and disambiguation
+  hackernews     via Algolia's public API; tech and fintech chatter
+  mastodon       public post search on any instance that allows it
+  bluesky        public post search over the AT Protocol, no key
+  reddit         official OAuth API   (REDDIT_CLIENT_ID/REDDIT_CLIENT_SECRET)
+  x              X/Twitter recent search, official paid API (X_BEARER_TOKEN)
+  gleif          Legal Entity Identifiers, free, no key
+  opencorporates company registries      (OPENCORPORATES_API_KEY)
+  sec_edgar      US filings full-text, useful for company checks
+  opensanctions  sanctions/PEP/watchlist matching (OPENSANCTIONS_API_KEY)
+
+Scraped platforms are absent on purpose — see CLAUDE.md. X is here *only*
+through its official paid API: a documented endpoint with a contract behind it
+fails loudly, where a scraper returns an empty list and calls it coverage.
+ICIJ Offshore Leaks is deliberately not here: it publishes no API, and the
+only way in would be scraping the search UI.
 
 Add a backend by writing one function with the same signature and registering
-it in BACKENDS. Nothing else in the pipeline needs to change.
+it in BACKENDS. Raise SourceError on failure and SourceSkipped when it isn't
+configured — never return [] for either. Nothing else in the pipeline changes.
 """
 
 from __future__ import annotations
 
+import base64
 import json
 import os
 import re
@@ -265,13 +279,10 @@ def opensanctions(query: str, fetcher: Fetcher, hours: int = 0,
         raise SourceSkipped("OPENSANCTIONS_API_KEY is not set")
     url = ("https://api.opensanctions.org/search/default?"
            + urlencode({"q": query, "limit": limit}))
-    old = fetcher.client.headers.get("Authorization")
-    fetcher.client.headers["Authorization"] = f"ApiKey {key}"
-    res = fetcher.get(url, api=True)
-    if old:
-        fetcher.client.headers["Authorization"] = old
-    else:
-        fetcher.client.headers.pop("Authorization", None)
+    # Per request, not on the shared client: the fan-out is concurrent, so
+    # assigning to fetcher.client.headers would put this key on whatever other
+    # backend happened to be mid-flight.
+    res = fetcher.get(url, api=True, headers={"Authorization": f"ApiKey {key}"})
     if not res.ok:
         _fail(res)
     try:
@@ -298,15 +309,317 @@ def opensanctions(query: str, fetcher: Fetcher, hours: int = 0,
     return out
 
 
+# ------------------------------------------------------------- web search
+
+def web_search(query: str, fetcher: Fetcher, hours: int = 72,
+               limit: int = 20) -> list[Item]:
+    """The whole indexed web, via Brave's Search API.
+
+    Every other backend here searches one silo. This one is what lets a sweep
+    reach an arbitrary domain — a regulator's own site, a *.vercel.app app, a
+    company blog — without writing a backend per host. Free tier is 2,000
+    queries/month. Needs BRAVE_API_KEY.
+    """
+    key = os.environ.get("BRAVE_API_KEY")
+    if not key:
+        raise SourceSkipped("BRAVE_API_KEY is not set")
+    freshness = {24: "pd", 168: "pw", 720: "pm"}.get(hours, "" if hours > 720 else "pw")
+    params = {"q": query, "count": min(limit, 20)}
+    if freshness:
+        params["freshness"] = freshness
+    url = "https://api.search.brave.com/res/v1/web/search?" + urlencode(params)
+    res = fetcher.get(url, api=True, headers={
+        "X-Subscription-Token": key, "Accept": "application/json"})
+    if not res.ok:
+        _fail(res)
+    try:
+        hits = json.loads(res.html).get("web", {}).get("results", [])
+    except json.JSONDecodeError:
+        raise SourceError("200 but the response body was not valid JSON")
+
+    out = []
+    for h in hits[:limit]:
+        if not h.get("url"):
+            continue
+        out.append(Item(
+            url=h["url"], source="web_search", source_type="news",
+            title=_strip_tags(h.get("title", "")),
+            text=_strip_tags(h.get("description", "")),
+            published_at=h.get("page_age", "") or h.get("age", ""),
+            raw_meta={"domain": (h.get("meta_url", {}) or {}).get("hostname", "")},
+        ))
+    return out
+
+
+# ------------------------------------------------------------------ GLEIF
+
+def gleif(query: str, fetcher: Fetcher, hours: int = 0,
+          limit: int = 10) -> list[Item]:
+    """Legal Entity Identifiers. Free, no registration, no key.
+
+    Answers "is this the same company?" — the name collision that produces the
+    classic adverse-media false positive. An LEI is an unambiguous handle where
+    a name is not.
+    """
+    url = "https://api.gleif.org/api/v1/lei-records?" + urlencode({
+        "filter[fulltext]": query, "page[size]": min(limit, 50)})
+    res = fetcher.get(url, api=True, headers={"Accept": "application/vnd.api+json"})
+    if not res.ok:
+        _fail(res)
+    try:
+        records = json.loads(res.html).get("data", [])
+    except json.JSONDecodeError:
+        raise SourceError("200 but the response body was not valid JSON")
+
+    out = []
+    for r in records[:limit]:
+        a = r.get("attributes", {}) or {}
+        ent = a.get("entity", {}) or {}
+        name = (ent.get("legalName", {}) or {}).get("name", "")
+        addr = ent.get("legalAddress", {}) or {}
+        country = addr.get("country", "")
+        status = ent.get("status", "")
+        lei = a.get("lei", r.get("id", ""))
+        if not lei:
+            continue
+        out.append(Item(
+            url=f"https://search.gleif.org/#/record/{lei}",
+            source="gleif", source_type="dataset",
+            title=f"{name} ({country})" if country else name,
+            text=(f"LEI {lei}. Legal name: {name}. Country: {country}. "
+                  f"Entity status: {status}. "
+                  f"Registered: {', '.join(filter(None, addr.get('addressLines', []) or []))}"),
+            published_at=(a.get("registration", {}) or {}).get("lastUpdateDate", ""),
+            raw_meta={"lei": lei, "country": country, "status": status},
+        ))
+    return out
+
+
+# ---------------------------------------------------------- OpenCorporates
+
+def opencorporates(query: str, fetcher: Fetcher, hours: int = 0,
+                   limit: int = 15) -> list[Item]:
+    """Company registry data across 140+ jurisdictions. Needs
+    OPENCORPORATES_API_KEY (free tier available on request)."""
+    key = os.environ.get("OPENCORPORATES_API_KEY")
+    if not key:
+        raise SourceSkipped("OPENCORPORATES_API_KEY is not set")
+    url = "https://api.opencorporates.com/v0.4/companies/search?" + urlencode(
+        {"q": query, "per_page": min(limit, 30), "api_token": key})
+    res = fetcher.get(url, api=True)
+    if not res.ok:
+        _fail(res)
+    try:
+        companies = (json.loads(res.html).get("results", {}) or {}).get("companies", [])
+    except json.JSONDecodeError:
+        raise SourceError("200 but the response body was not valid JSON")
+
+    out = []
+    for entry in companies[:limit]:
+        c = entry.get("company", {}) or {}
+        if not c.get("opencorporates_url"):
+            continue
+        out.append(Item(
+            url=c["opencorporates_url"], source="opencorporates",
+            source_type="dataset",
+            title=f"{c.get('name', '')} ({c.get('jurisdiction_code', '')})",
+            text=(f"Company number {c.get('company_number', '')}. "
+                  f"Status: {c.get('current_status', 'unknown')}. "
+                  f"Incorporated: {c.get('incorporation_date', 'unknown')}. "
+                  f"Type: {c.get('company_type', '')}"),
+            published_at=c.get("updated_at", ""),
+            raw_meta={"jurisdiction": c.get("jurisdiction_code", ""),
+                      "status": c.get("current_status", "")},
+        ))
+    return out
+
+
+# ---------------------------------------------------------------- Bluesky
+
+def bluesky(query: str, fetcher: Fetcher, hours: int = 72,
+            limit: int = 25) -> list[Item]:
+    """Post search over the AT Protocol. Needs BLUESKY_HANDLE and
+    BLUESKY_APP_PASSWORD (Settings -> App Passwords; free, revocable, and not
+    your account password).
+
+    Read endpoints like getProfile are open, but searchPosts is refused at the
+    CDN without a session — diagnose.py caught this returning 403 for every
+    user agent, which as a silent [] would have looked like "no posts found"
+    forever. App passwords are Bluesky's supported mechanism for exactly this,
+    so this stays an intended-consumer API call, not a scrape.
+    """
+    handle = os.environ.get("BLUESKY_HANDLE")
+    app_password = os.environ.get("BLUESKY_APP_PASSWORD")
+    if not (handle and app_password):
+        raise SourceSkipped("BLUESKY_HANDLE / BLUESKY_APP_PASSWORD are not set")
+
+    auth = fetcher.post(
+        "https://bsky.social/xrpc/com.atproto.server.createSession",
+        json_body={"identifier": handle, "password": app_password}, api=True)
+    if not auth.ok:
+        _fail(auth)
+    try:
+        jwt = json.loads(auth.html).get("accessJwt")
+    except json.JSONDecodeError:
+        raise SourceError("auth response was not valid JSON")
+    if not jwt:
+        raise SourceError("no session token returned — check handle/app password")
+
+    url = "https://api.bsky.app/xrpc/app.bsky.feed.searchPosts?" + urlencode(
+        {"q": query, "limit": min(limit, 100), "sort": "latest"})
+    res = fetcher.get(url, api=True, headers={"Authorization": f"Bearer {jwt}"})
+    if not res.ok:
+        _fail(res)
+    try:
+        posts = json.loads(res.html).get("posts", [])
+    except json.JSONDecodeError:
+        raise SourceError("200 but the response body was not valid JSON")
+
+    out = []
+    for p in posts[:limit]:
+        rec = p.get("record", {}) or {}
+        handle = (p.get("author", {}) or {}).get("handle", "")
+        rkey = (p.get("uri", "") or "").rsplit("/", 1)[-1]
+        if not (handle and rkey):
+            continue
+        text = rec.get("text", "")
+        out.append(Item(
+            url=f"https://bsky.app/profile/{handle}/post/{rkey}",
+            source="bluesky", source_type="social",
+            title=text[:120], text=text, author=handle,
+            published_at=rec.get("createdAt", ""),
+            raw_meta={"likes": p.get("likeCount"), "reposts": p.get("repostCount")},
+        ))
+    return out
+
+
+# ----------------------------------------------------------------- Reddit
+
+def reddit(query: str, fetcher: Fetcher, hours: int = 72,
+           limit: int = 25) -> list[Item]:
+    """Official OAuth API. Needs REDDIT_CLIENT_ID and REDDIT_CLIENT_SECRET
+    (free: create a 'script' app at reddit.com/prefs/apps).
+
+    Reddit requires OAuth for automated access; the old unauthenticated .json
+    endpoints are not a supported interface and are being closed off, so this
+    deliberately does not fall back to them.
+    """
+    cid = os.environ.get("REDDIT_CLIENT_ID")
+    secret = os.environ.get("REDDIT_CLIENT_SECRET")
+    if not (cid and secret):
+        raise SourceSkipped("REDDIT_CLIENT_ID / REDDIT_CLIENT_SECRET are not set")
+
+    basic = base64.b64encode(f"{cid}:{secret}".encode()).decode()
+    token_res = fetcher.post(
+        "https://www.reddit.com/api/v1/access_token",
+        data={"grant_type": "client_credentials"},
+        headers={"Authorization": f"Basic {basic}"}, api=True)
+    if not token_res.ok:
+        _fail(token_res)
+    try:
+        token = json.loads(token_res.html).get("access_token")
+    except json.JSONDecodeError:
+        raise SourceError("auth response was not valid JSON")
+    if not token:
+        raise SourceError("no access token returned — check the credentials")
+
+    window = "day" if hours <= 24 else "week" if hours <= 168 else "month"
+    url = "https://oauth.reddit.com/search?" + urlencode(
+        {"q": query, "limit": min(limit, 100), "sort": "new", "t": window,
+         "type": "link"})
+    res = fetcher.get(url, api=True, headers={"Authorization": f"Bearer {token}"})
+    if not res.ok:
+        _fail(res)
+    try:
+        children = (json.loads(res.html).get("data", {}) or {}).get("children", [])
+    except json.JSONDecodeError:
+        raise SourceError("200 but the response body was not valid JSON")
+
+    out = []
+    for child in children[:limit]:
+        d = child.get("data", {}) or {}
+        if not d.get("permalink"):
+            continue
+        created = d.get("created_utc")
+        out.append(Item(
+            url=f"https://www.reddit.com{d['permalink']}",
+            source="reddit", source_type="social",
+            title=(d.get("title") or "").strip(),
+            text=_strip_tags(d.get("selftext", ""))[:2000],
+            author=d.get("author", ""),
+            published_at=(_iso(datetime.fromtimestamp(created, timezone.utc))
+                          if created else ""),
+            raw_meta={"subreddit": d.get("subreddit", ""),
+                      "score": d.get("score"), "comments": d.get("num_comments")},
+        ))
+    return out
+
+
+# ---------------------------------------------------------------------- X
+
+def x_twitter(query: str, fetcher: Fetcher, hours: int = 72,
+              limit: int = 20) -> list[Item]:
+    """X/Twitter recent search via the official paid API. Needs X_BEARER_TOKEN.
+
+    This is the official documented endpoint on a paid tier, which is why it is
+    here when scraping X is not: it's a supported interface with a real
+    contract behind it, so it fails loudly rather than silently. Recent search
+    only reaches back 7 days on most tiers — beyond that this returns nothing,
+    which is a real limit of the product, not of the sweep.
+    """
+    token = os.environ.get("X_BEARER_TOKEN")
+    if not token:
+        raise SourceSkipped("X_BEARER_TOKEN is not set")
+    url = "https://api.x.com/2/tweets/search/recent?" + urlencode({
+        "query": f"{query} -is:retweet",
+        "max_results": max(10, min(limit, 100)),
+        "tweet.fields": "created_at,public_metrics,lang,author_id",
+        "expansions": "author_id",
+        "user.fields": "username",
+    })
+    res = fetcher.get(url, api=True, headers={"Authorization": f"Bearer {token}"})
+    if not res.ok:
+        _fail(res)
+    try:
+        payload = json.loads(res.html)
+    except json.JSONDecodeError:
+        raise SourceError("200 but the response body was not valid JSON")
+
+    users = {u["id"]: u.get("username", "")
+             for u in (payload.get("includes", {}) or {}).get("users", [])}
+    out = []
+    for t in payload.get("data", [])[:limit]:
+        handle = users.get(t.get("author_id", ""), "i")
+        text = t.get("text", "")
+        out.append(Item(
+            url=f"https://x.com/{handle}/status/{t.get('id', '')}",
+            source="x", source_type="social",
+            title=text[:120], text=text, author=handle,
+            published_at=t.get("created_at", ""), lang=t.get("lang", ""),
+            raw_meta=t.get("public_metrics", {}) or {},
+        ))
+    return out
+
+
 BACKENDS = {
     "gdelt": gdelt,
     "google_news": google_news,
+    "web_search": web_search,
     "wikipedia": wikipedia,
     "hackernews": hackernews,
     "mastodon": mastodon,
+    "bluesky": bluesky,
+    "reddit": reddit,
+    "x": x_twitter,
+    "gleif": gleif,
+    "opencorporates": opencorporates,
     "sec_edgar": sec_edgar,
     "opensanctions": opensanctions,
 }
 
-DEFAULT_BACKENDS = ["gdelt", "google_news", "wikipedia", "hackernews",
-                    "mastodon", "opensanctions"]
+# Key-gated backends stay in the defaults: they now disable themselves in the
+# UI when the key is absent, and raise SourceSkipped rather than a silent zero
+# on the CLI, so including them costs nothing and forgetting a key is visible.
+DEFAULT_BACKENDS = ["gdelt", "google_news", "web_search", "wikipedia",
+                    "hackernews", "mastodon", "bluesky", "reddit", "x",
+                    "gleif", "opencorporates", "opensanctions"]

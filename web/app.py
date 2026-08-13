@@ -126,7 +126,14 @@ def list_sources():
     # same question as `default`. opensanctions is both a default and key-gated,
     # so keying the UI off `default` left it selected and silently returning
     # nothing — the worst possible failure for a sanctions check.
-    keyed = {"opensanctions": "OPENSANCTIONS_API_KEY"}
+    keyed = {
+        "opensanctions": "OPENSANCTIONS_API_KEY",
+        "web_search": "BRAVE_API_KEY",
+        "opencorporates": "OPENCORPORATES_API_KEY",
+        "x": "X_BEARER_TOKEN",
+        "reddit": "REDDIT_CLIENT_ID",
+        "bluesky": "BLUESKY_APP_PASSWORD",
+    }
     return {
         "sources": [
             {"name": n, "default": n in DEFAULT_BACKENDS,

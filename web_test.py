@@ -67,8 +67,14 @@ def main():
 
     r = client.get("/api/sources")
     body = r.json()
-    ok &= check("lists every backend", len(body["sources"]) == 7)
-    ok &= check("marks defaults", sum(s["default"] for s in body["sources"]) == 6)
+    # Compare against the registry, not a hardcoded number — the last count
+    # here drifted silently and told us 33 checks when there were 36.
+    from core.sources import BACKENDS, DEFAULT_BACKENDS
+    ok &= check("lists every backend", len(body["sources"]) == len(BACKENDS))
+    ok &= check("marks defaults", sum(s["default"] for s in body["sources"])
+                == len(DEFAULT_BACKENDS))
+    ok &= check("every key-gated source names its key",
+                all(s["key_name"] for s in body["sources"] if s["needs_key"]))
     ok &= check("flags the one needing a key",
                 any(s["needs_key"] for s in body["sources"]))
     # A key-gated source that is also a default used to ship selected and dead.

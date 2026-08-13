@@ -44,7 +44,29 @@ ENDPOINTS = {
         {"q": f'"{q}"', "hits": 5}),
     "opensanctions": lambda q: "https://api.opensanctions.org/search/default?"
                                + urlencode({"q": q, "limit": 5}),
+    "bluesky": lambda q: "https://public.api.bsky.app/xrpc/app.bsky.feed.searchPosts?"
+                         + urlencode({"q": q, "limit": 5}),
+    "gleif": lambda q: "https://api.gleif.org/api/v1/lei-records?"
+                       + urlencode({"filter[fulltext]": q, "page[size]": 5}),
+    "web_search": lambda q: "https://api.search.brave.com/res/v1/web/search?"
+                            + urlencode({"q": q, "count": 5}),
+    "opencorporates": lambda q: "https://api.opencorporates.com/v0.4/companies/search?"
+                                + urlencode({"q": q, "per_page": 5}),
+    "reddit": lambda q: "https://oauth.reddit.com/search?" + urlencode(
+        {"q": q, "limit": 5}),
+    "x": lambda q: "https://api.x.com/2/tweets/search/recent?" + urlencode(
+        {"query": q, "max_results": 10}),
 }
+
+# Endpoints that answer 401/403 without credentials. diagnose.py deliberately
+# sends none — the point is to prove the endpoint is reachable and identify why
+# it refuses, not to exercise the key.
+NEEDS_KEY = {"opensanctions": "OPENSANCTIONS_API_KEY",
+             "web_search": "BRAVE_API_KEY",
+             "opencorporates": "OPENCORPORATES_API_KEY",
+             "reddit": "REDDIT_CLIENT_ID / REDDIT_CLIENT_SECRET",
+             "x": "X_BEARER_TOKEN",
+             "bluesky": "BLUESKY_HANDLE / BLUESKY_APP_PASSWORD"}
 
 
 def load_ua() -> str:
@@ -93,6 +115,11 @@ def probe(name: str, url: str, client: httpx.Client, ua: str) -> dict:
         body = r.text
         out["bytes"] = len(body)
 
+        if r.status_code in (401, 403, 422) and name in NEEDS_KEY:
+            out["result"] = f"HTTP {r.status_code} — reachable, needs credentials"
+            out["hint"] = f"set {NEEDS_KEY[name]}"
+            return out
+
         if r.status_code != 200:
             out["result"] = f"HTTP {r.status_code}"
             out["hint"] = {
@@ -106,7 +133,8 @@ def probe(name: str, url: str, client: httpx.Client, ua: str) -> dict:
         if "json" in ctype or body.lstrip().startswith(("{", "[")):
             data = json.loads(body)
             count = None
-            for key in ("articles", "hits", "results", "statuses"):
+            for key in ("articles", "hits", "results", "statuses",
+                        "posts", "data"):
                 if isinstance(data, dict) and key in data:
                     count = len(data[key])
                     break

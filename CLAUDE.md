@@ -109,10 +109,19 @@ prefilter makes every sweep cost real money.
 Haiku triages and only items above `escalate_above` get a Sonnet pass, tool use
 forces valid JSON. Models: `claude-haiku-4-5-20251001` and `claude-sonnet-5`.
 
-**Instagram, TikTok, LinkedIn and X are deliberately absent.** They prohibit
-scraping and fail *silently* — you get empty results and believe you have
-coverage. Do not add them, even if asked casually; raise the tradeoff first.
-Mastodon is included because it has an open public API.
+**Scraped platforms stay absent; official APIs are fine.** Instagram, TikTok,
+LinkedIn and Facebook have no usable public API, prohibit scraping, and fail
+*silently* — a scraper returns an empty list and you believe you have coverage.
+Do not add them, even if asked casually; raise the tradeoff first. The line is
+the interface, not the brand: **X is included via its official paid API**
+(`X_BEARER_TOKEN`), because a documented endpoint with a contract behind it
+fails loudly. If TikTok Research API access is ever granted, the same reasoning
+would admit it. Mastodon and Bluesky are here because both publish open APIs.
+
+**ICIJ Offshore Leaks is intentionally not a backend.** It is the single most
+on-topic dataset for beneficial ownership, and it publishes no API — the only
+way in is scraping the search UI, which is the thing above. Their bulk data
+download is the honest route if this is ever wanted.
 
 **Everything degrades without keys — visibly.** No `ANTHROPIC_API_KEY` means
 keyword ranking, not a crash. No `OPENSANCTIONS_API_KEY` means that backend

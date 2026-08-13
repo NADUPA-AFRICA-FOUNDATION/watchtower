@@ -109,9 +109,15 @@ class Fetcher:
 
     # ---------- fetching ----------
 
-    def get(self, url: str, retries: int = 2, api: bool = False) -> FetchResult:
+    def get(self, url: str, retries: int = 2, api: bool = False,
+            headers: dict | None = None) -> FetchResult:
         """`api=True` skips the robots check. Use it only for the declared
         public API endpoints in core/sources.py.
+
+        `headers` are merged for this request only. Backends that need an API
+        key MUST use this rather than assigning to `fetcher.client.headers`:
+        the client is shared and the fan-out is concurrent, so mutating it
+        leaks one source's credentials onto another source's request.
 
         robots.txt governs crawlers indexing pages; it is not the access
         control mechanism for a documented JSON API you are calling as an
@@ -134,7 +140,7 @@ class Fetcher:
         for attempt in range(retries + 1):
             self._throttle(domain)
             try:
-                r = self.client.get(url)
+                r = self.client.get(url, headers=headers or None)
             except httpx.HTTPError as e:
                 if attempt == retries:
                     return FetchResult(url, 0, error=f"{type(e).__name__}: {e}")
@@ -155,6 +161,27 @@ class Fetcher:
             return FetchResult(url, 200, html=r.text)
 
         return FetchResult(url, 0, error="exhausted retries")
+
+    def post(self, url: str, data: dict | None = None,
+             headers: dict | None = None, api: bool = False,
+             json_body: dict | None = None) -> FetchResult:
+        """Only for API auth handshakes (OAuth token exchange), which is why
+        there's no retry loop: replaying a credential grant is not obviously
+        safe, and a failed one should surface immediately rather than be
+        attempted three times against someone's rate limit."""
+        if not api and not self.allowed(url):
+            return FetchResult(url, 0, error="blocked by robots.txt")
+        self._throttle(urlparse(url).netloc)
+        try:
+            r = (self.client.post(url, json=json_body, headers=headers or None)
+                 if json_body is not None
+                 else self.client.post(url, data=data or {},
+                                       headers=headers or None))
+        except httpx.HTTPError as e:
+            return FetchResult(url, 0, error=f"{type(e).__name__}: {e}")
+        if r.status_code != 200:
+            return FetchResult(url, r.status_code, error=f"HTTP {r.status_code}")
+        return FetchResult(url, 200, html=r.text)
 
     def close(self) -> None:
         self.client.close()

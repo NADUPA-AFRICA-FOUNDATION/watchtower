@@ -80,6 +80,29 @@ MASTODON_JSON = {"statuses": [
      "account": {"acct": "x"}}]}
 
 
+BLUESKY_JSON = {"posts": [
+    {"uri": "at://did:plc:abc/app.bsky.feed.post/3kxyz",
+     "author": {"handle": "openkenya.bsky.social"},
+     "record": {"text": "Kenya beneficial ownership register goes live",
+                "createdAt": "2026-08-12T10:00:00Z"},
+     "likeCount": 4, "repostCount": 2}]}
+
+GLEIF_JSON = {"data": [
+    {"id": "5493001KJTIIGC8Y1R12",
+     "attributes": {"lei": "5493001KJTIIGC8Y1R12",
+                    "entity": {"legalName": {"name": "EXAMPLE HOLDINGS PLC"},
+                               "legalAddress": {"country": "KE",
+                                                "addressLines": ["Nairobi"]},
+                               "status": "ACTIVE"},
+                    "registration": {"lastUpdateDate": "2026-07-01T00:00:00Z"}}}]}
+
+BRAVE_JSON = {"web": {"results": [
+    {"title": "Beneficial ownership register rules",
+     "url": "https://regulator.example.vercel.app/rules",
+     "description": "New disclosure thresholds for trusts.",
+     "page_age": "2026-08-12", "meta_url": {"hostname": "regulator.example.vercel.app"}}]}}
+
+
 def handler(request: httpx.Request) -> httpx.Response:
     u = str(request.url)
     if "robots.txt" in u:
@@ -94,6 +117,14 @@ def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json=HN_JSON)
     if "mastodon.social/api" in u:
         return httpx.Response(200, json=MASTODON_JSON)
+    if "createSession" in u:
+        return httpx.Response(200, json={"accessJwt": "test-jwt"})
+    if "bsky.app" in u:
+        return httpx.Response(200, json=BLUESKY_JSON)
+    if "api.gleif.org" in u:
+        return httpx.Response(200, json=GLEIF_JSON)
+    if "api.search.brave.com" in u:
+        return httpx.Response(200, json=BRAVE_JSON)
     if "/sport/" in u:
         return httpx.Response(200, text=IRRELEVANT_HTML)
     if "outlet-b.com" in u or "outlet-a.co.ke" in u or "outlet-c.co.ke" in u:
@@ -141,6 +172,8 @@ def main():
 
     print("\nfull sweep (mocked network, no API key)")
     res = sweep(QUERY, fetcher, hours=72, limit=20, fetch_bodies=True,
+                backends=["gdelt", "google_news", "wikipedia", "hackernews",
+                          "mastodon", "opensanctions"],
                 enricher=None,
                 progress=lambda e: (lambda l: print("   " + l) if l else None)(
                     report.progress_line(e)))
@@ -347,6 +380,81 @@ def main():
                 _fr(type("E", (Exception,), {"status_code": 401})()) is not None)
     ok &= check("a rate limit is NOT fatal — worth continuing past",
                 _fr(type("E", (Exception,), {"status_code": 429})()) is None)
+
+    print("\nnew backends")
+    from core.sources import (BACKENDS, DEFAULT_BACKENDS, bluesky as bsky_fn,
+                              gleif as gleif_fn, opencorporates as oc_fn,
+                              reddit as reddit_fn, web_search as ws_fn,
+                              x_twitter as x_fn)
+
+    _os_b = __import__("os")
+    _os_b.environ["BLUESKY_HANDLE"] = "tester.bsky.social"
+    _os_b.environ["BLUESKY_APP_PASSWORD"] = "test-app-password"
+    try:
+        posts = bsky_fn(QUERY, fetcher, limit=5)
+    finally:
+        _os_b.environ.pop("BLUESKY_HANDLE", None)
+        _os_b.environ.pop("BLUESKY_APP_PASSWORD", None)
+    ok &= check("bluesky parses public post search", len(posts) == 1)
+    ok &= check("and builds a reachable post URL",
+                posts[0].url ==
+                "https://bsky.app/profile/openkenya.bsky.social/post/3kxyz")
+
+    leis = gleif_fn(QUERY, fetcher, limit=5)
+    ok &= check("gleif parses LEI records", len(leis) == 1)
+    ok &= check("and carries the LEI itself",
+                leis[0].raw_meta["lei"] == "5493001KJTIIGC8Y1R12")
+
+    import os as _os
+    _os.environ["BRAVE_API_KEY"] = "test-key"
+    try:
+        web = ws_fn(QUERY, fetcher, limit=5)
+        ok &= check("web search reaches an arbitrary domain",
+                    web[0].url.endswith("example.vercel.app/rules"))
+    finally:
+        _os.environ.pop("BRAVE_API_KEY", None)
+
+    # Every key-gated backend must skip, never return a misleading zero.
+    for fn, label in ((ws_fn, "web_search"), (oc_fn, "opencorporates"),
+                      (reddit_fn, "reddit"), (x_fn, "x"), (bsky_fn, "bluesky")):
+        try:
+            fn(QUERY, fetcher, limit=5)
+            ok &= check(f"{label} reports as unsearched without its key", False)
+        except SourceSkipped:
+            ok &= check(f"{label} reports as unsearched without its key", True)
+        except Exception as e:
+            ok &= check(f"{label} reports as unsearched without its key "
+                        f"(got {type(e).__name__})", False)
+
+    ok &= check("every registered backend is callable",
+                all(callable(f) for f in BACKENDS.values()))
+    ok &= check("every default is registered",
+                all(b in BACKENDS for b in DEFAULT_BACKENDS))
+    ok &= check("no scraped platform crept into the registry",
+                not ({"tiktok", "instagram", "linkedin", "facebook", "threads"}
+                     & set(BACKENDS)))
+    ok &= check("X is present only as the official API",
+                BACKENDS["x"].__doc__ and "official" in BACKENDS["x"].__doc__)
+
+    print("\ncredentials must not leak between concurrent backends")
+    seen_headers = []
+
+    def spy(request: httpx.Request) -> httpx.Response:
+        seen_headers.append((str(request.url), request.headers.get("authorization")))
+        return handler(request)
+
+    spy_fetcher = Fetcher("watchtower-test/0.1", delay=0.0,
+                          transport=httpx.MockTransport(spy))
+    _os.environ["OPENSANCTIONS_API_KEY"] = "secret-sanctions-key"
+    try:
+        sweep(QUERY, spy_fetcher, hours=72, fetch_bodies=False,
+              backends=["opensanctions", "gdelt", "wikipedia", "bluesky"])
+    finally:
+        _os.environ.pop("OPENSANCTIONS_API_KEY", None)
+    leaked = [u for u, auth in seen_headers
+              if auth and "opensanctions.org" not in u]
+    ok &= check("the sanctions key is sent to opensanctions only", not leaked)
+    spy_fetcher.close()
 
     print("\nfailure handling")
     bad = sweep("nothing matches here", fetcher, hours=24,
