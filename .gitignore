@@ -1,0 +1,25 @@
+# Secrets — never commit these. API keys go in .env, which stays local.
+.env
+.env.*
+!.env.example
+*.key
+
+# Virtualenv
+.venv/
+venv/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# Runtime output: the archive database and generated reports are data, not code
+*.db
+*.db-journal
+*.db-wal
+out/
+out_test/
+
+# macOS
+.DS_Store

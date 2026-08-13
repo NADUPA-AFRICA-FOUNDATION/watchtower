@@ -1,0 +1,70 @@
+# Everything you tune lives here. Adding a source should never mean editing code.
+
+fetch:
+  # Put a real contact address in here. Site owners who can reach you will
+  # email before they block you.
+  user_agent: "watchtower/0.1 (monitoring research; you@example.com)"
+  delay_seconds: 2.0      # per domain, not global
+  timeout_seconds: 20
+  obey_robots: true       # leave this on
+
+storage:
+  database: "watchtower.db"
+  output_dir: "out"
+
+enrichment:
+  enabled: true           # silently no-ops without ANTHROPIC_API_KEY
+  batch_size: 40          # items enriched per run
+  escalate_above: 60      # Haiku score at which Sonnet takes a second look
+  categories:
+    - sanctions
+    - enforcement action
+    - fraud
+    - money laundering
+    - regulatory change
+    - virtual assets
+    - data protection
+    - corporate governance
+
+alerts:
+  min_relevance: 60
+  # Exact names and terms you want caught deterministically.
+  watchlist:
+    - Central Bank of Kenya
+    - Financial Reporting Centre
+    - beneficial ownership
+    - virtual asset service provider
+    - correspondent banking
+
+sources:
+  rss:
+    - name: cbk
+      url: "https://www.centralbank.go.ke/feed/"
+      type: regulatory
+      fetch_body: true
+    # RSSHub example. Self-host it and a lot of feed-less sites become feeds:
+    # - name: some-account
+    #   url: "http://localhost:1200/telegram/channel/somechannel"
+    #   type: social
+
+  gdelt:
+    - query: '"money laundering" (Kenya OR Tanzania) sourcelang:english'
+      timespan: "24h"
+      max_records: 40
+      fetch_body: false
+    - query: '"virtual asset" regulation Africa sourcelang:english'
+      timespan: "48h"
+      max_records: 30
+      fetch_body: false
+
+  webpage:
+    # Listing pages with no feed. link_pattern narrows to the docs you want.
+    - name: example-regulator
+      url: "https://example.org/press-releases"
+      link_pattern: "/press-release|/notice|\\.pdf$"
+      type: regulatory
+      limit: 15
+
+  reddit:
+    subreddits: []        # e.g. [fintech, kenya]
+    limit: 20

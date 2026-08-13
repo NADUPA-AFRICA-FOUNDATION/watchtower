@@ -1,0 +1,291 @@
+"""End-to-end sweep test with mocked HTTP.
+
+Runs the real sweep pipeline — every backend parser, dedupe, concurrent body
+fetching, keyword ranking, diversification, both renderers — against realistic
+canned responses injected through httpx's transport layer. Nothing is stubbed
+out inside the code under test; only the network is replaced.
+
+    python sweep_test.py
+"""
+
+import json
+import sys
+import time
+from pathlib import Path
+
+import httpx
+
+sys.path.insert(0, str(Path(__file__).parent))
+
+from core import report
+from core.fetch import Fetcher
+from core.sources import (SourceError, SourceSkipped, gdelt,
+                          opensanctions, wikipedia)
+from core.sweep import _diversify, _keyword_score, _terms, sweep
+from core.models import Item
+
+QUERY = "beneficial ownership Kenya"
+
+ARTICLE_HTML = """<html><head><title>Regulator tightens beneficial ownership rules</title></head>
+<body><nav><a href="/">Home</a></nav><article><h1>Regulator tightens beneficial
+ownership rules</h1><p>The Central Bank of Kenya has published revised guidance
+requiring banks in Kenya to verify beneficial ownership of corporate customers
+before onboarding. The guidance follows a review of correspondent banking
+controls.</p><p>Institutions have ninety days to comply.</p></article>
+<footer>Subscribe now!</footer></body></html>"""
+
+IRRELEVANT_HTML = """<html><head><title>Nairobi derby ends level</title></head>
+<body><article><p>The Nairobi derby finished one-all on Saturday after a late
+equaliser.</p></article></body></html>"""
+
+GDELT_JSON = {"articles": [
+    {"url": "https://outlet-a.co.ke/story/1", "title": "Regulator tightens beneficial ownership rules",
+     "seendate": "20260810T090000Z", "domain": "outlet-a.co.ke",
+     "sourcecountry": "Kenya", "language": "English"},
+    # Same story, different outlet — must collapse on content hash after fetch.
+    {"url": "https://outlet-b.com/wire/9", "title": "Regulator tightens beneficial ownership rules",
+     "seendate": "20260810T093000Z", "domain": "outlet-b.com",
+     "sourcecountry": "United States", "language": "English"},
+    {"url": "https://outlet-a.co.ke/sport/5", "title": "Nairobi derby ends level",
+     "seendate": "20260810T100000Z", "domain": "outlet-a.co.ke",
+     "sourcecountry": "Kenya", "language": "English"},
+    {"url": "https://outlet-a.co.ke/story/2", "title": "Bank fined over ownership checks",
+     "seendate": "20260809T080000Z", "domain": "outlet-a.co.ke",
+     "sourcecountry": "Kenya", "language": "English"},
+    {"url": "https://outlet-a.co.ke/story/3", "title": "Ownership registry consultation opens",
+     "seendate": "20260809T070000Z", "domain": "outlet-a.co.ke",
+     "sourcecountry": "Kenya", "language": "English"},
+]}
+
+GNEWS_RSS = """<?xml version="1.0"?><rss version="2.0"><channel>
+<item><title>Kenya publishes beneficial ownership register rules</title>
+<link>https://outlet-c.co.ke/news/44</link>
+<pubDate>Mon, 10 Aug 2026 07:00:00 GMT</pubDate>
+<description>&lt;p&gt;New rules require disclosure of beneficial ownership.&lt;/p&gt;</description>
+</item></channel></rss>"""
+
+WIKI_JSON = {"query": {"search": [
+    {"title": "Beneficial ownership", "timestamp": "2026-06-01T00:00:00Z",
+     "snippet": "A <span>beneficial owner</span> is the natural person who ultimately owns or controls a legal entity."}]}}
+
+HN_JSON = {"hits": [
+    {"objectID": "111", "title": "Ownership transparency tooling", "url": "https://hnlink.io/x",
+     "author": "someone", "created_at": "2026-08-09T12:00:00Z", "points": 40,
+     "num_comments": 12, "story_text": "Discussion of beneficial ownership registries."}]}
+
+MASTODON_JSON = {"statuses": [
+    {"url": "https://mastodon.social/@x/1", "uri": "https://mastodon.social/@x/1",
+     "content": "<p>Kenya's beneficial ownership register just went live.</p>",
+     "created_at": "2026-08-10T11:00:00Z", "reblogs_count": 3, "favourites_count": 9,
+     "account": {"acct": "x"}}]}
+
+
+def handler(request: httpx.Request) -> httpx.Response:
+    u = str(request.url)
+    if "robots.txt" in u:
+        return httpx.Response(200, text="User-agent: *\nAllow: /\n")
+    if "gdeltproject.org" in u:
+        return httpx.Response(200, json=GDELT_JSON)
+    if "news.google.com" in u:
+        return httpx.Response(200, text=GNEWS_RSS)
+    if "wikipedia.org" in u:
+        return httpx.Response(200, json=WIKI_JSON)
+    if "hn.algolia.com" in u:
+        return httpx.Response(200, json=HN_JSON)
+    if "mastodon.social/api" in u:
+        return httpx.Response(200, json=MASTODON_JSON)
+    if "/sport/" in u:
+        return httpx.Response(200, text=IRRELEVANT_HTML)
+    if "outlet-b.com" in u or "outlet-a.co.ke" in u or "outlet-c.co.ke" in u:
+        return httpx.Response(200, text=ARTICLE_HTML)
+    if "unreachable" in u:
+        return httpx.Response(503, text="")
+    return httpx.Response(404, text="")
+
+
+def check(label, cond):
+    print(f"  {'PASS' if cond else 'FAIL'}  {label}")
+    return bool(cond)
+
+
+def main():
+    ok = True
+    fetcher = Fetcher("watchtower-test/0.1 (test@example.com)", delay=0.0,
+                      transport=httpx.MockTransport(handler))
+
+    print("\nquery parsing")
+    terms = _terms(QUERY)
+    ok &= check("drops stopwords, keeps content words",
+                terms == ["beneficial", "ownership", "kenya"])
+
+    print("\nkeyword scoring")
+    hit = Item(url="u", source="s", source_type="news",
+               title="Beneficial ownership in Kenya",
+               text="beneficial ownership rules in Kenya " * 3)
+    miss = Item(url="u2", source="s", source_type="news",
+                title="Football result", text="A match ended one all.")
+    ok &= check("relevant scores high", _keyword_score(hit, terms) >= 60)
+    ok &= check("irrelevant scores zero", _keyword_score(miss, terms) == 0)
+    ok &= check("relevant outranks irrelevant",
+                _keyword_score(hit, terms) > _keyword_score(miss, terms))
+
+    print("\ndiversification")
+    many = [Item(url=f"https://same.com/{i}", source="s", source_type="news",
+                 raw_meta={"domain": "same.com"}) for i in range(5)]
+    other = Item(url="https://other.com/1", source="s", source_type="news",
+                 raw_meta={"domain": "other.com"})
+    div = _diversify(many + [other], cap_per_domain=3)
+    ok &= check("one domain can't hold more than the cap up top",
+                div[3].raw_meta["domain"] == "other.com")
+    ok &= check("nothing is discarded", len(div) == 6)
+
+    print("\nfull sweep (mocked network, no API key)")
+    res = sweep(QUERY, fetcher, hours=72, limit=20, fetch_bodies=True,
+                enricher=None,
+                progress=lambda e: (lambda l: print("   " + l) if l else None)(
+                    report.progress_line(e)))
+
+    ok &= check("every backend returned", len(res.per_source) == 6)
+    ok &= check("gdelt parsed", res.per_source["gdelt"] == 5)
+    ok &= check("google news parsed", res.per_source["google_news"] == 1)
+    ok &= check("wikipedia parsed", res.per_source["wikipedia"] == 1)
+    ok &= check("hackernews parsed", res.per_source["hackernews"] == 1)
+    ok &= check("mastodon parsed", res.per_source["mastodon"] == 1)
+    ok &= check("opensanctions skipped without key",
+                res.per_source["opensanctions"] == 0)
+    ok &= check("no errors", not res.errors)
+
+    urls = [i.url for i in res.items]
+    ok &= check("syndicated duplicate collapsed",
+                not ("https://outlet-a.co.ke/story/1" in urls
+                     and "https://outlet-b.com/wire/9" in urls))
+    ok &= check("bodies were fetched and cleaned",
+                any("ninety days to comply" in i.text for i in res.items))
+    ok &= check("nav and footer stripped",
+                all("Subscribe now" not in i.text for i in res.items))
+
+    top = res.items[0]
+    sport = next((i for i in res.items if "derby" in i.title.lower()), None)
+    ok &= check("relevant result ranks first", top.relevance >= 60)
+    ok &= check("irrelevant result ranks last",
+                sport is not None and sport.relevance < top.relevance)
+    ok &= check("results are sorted by score",
+                all(res.items[i].relevance >= res.items[i + 1].relevance
+                    for i in range(len(res.items) - 1)))
+    ok &= check("enriched flag off without a key", res.enriched is False)
+
+    print("\nrendering")
+    term = report.terminal(res, top=5)
+    ok &= check("terminal shows the query", QUERY in term)
+    ok &= check("terminal flags keyword-only mode", "keyword ranking only" in term)
+    ok &= check("bands render", "HIGH" in term or "MED" in term)
+
+    md = report.markdown(res)
+    ok &= check("markdown has a heading", md.startswith("# Sweep:"))
+    ok &= check("markdown lists every finding",
+                md.count("### ") >= len(res.items) - 1)
+    ok &= check("markdown carries the run detail table", "| Source | Hits |" in md)
+
+    out = report.save(res, "out_test")
+    ok &= check("report file written", out.exists() and out.stat().st_size > 400)
+    out.unlink()
+    out.parent.rmdir()
+
+    print("\nper-domain rate limiting under concurrency")
+    # The parallel fan-out in sweep.py assumes _throttle holds under threads.
+    # Assert it rather than trusting it: 8 threads onto one domain with a 50ms
+    # delay must serialise to >=350ms of gaps, and no two hits may coincide.
+    import threading as _th
+    rl = Fetcher("watchtower-test/0.1", delay=0.05,
+                 transport=httpx.MockTransport(handler))
+    stamps, slock = [], _th.Lock()
+
+    def hammer():
+        rl._throttle("same-host.example")
+        with slock:
+            stamps.append(time.monotonic())
+
+    threads = [_th.Thread(target=hammer) for _ in range(8)]
+    t0 = time.monotonic()
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    span = time.monotonic() - t0
+    gaps = [b - a for a, b in zip(sorted(stamps), sorted(stamps)[1:])]
+    ok &= check("concurrent hits on one domain are serialised", span >= 0.35)
+    ok &= check("no two threads pass the throttle together",
+                all(g >= 0.04 for g in gaps))
+    rl.close()
+
+    print("\nAPI calls are not treated as crawling")
+    # robots.txt for the Wikipedia API disallows /w/ — the endpoint Wikipedia
+    # publishes for this purpose. Crawling must still obey it.
+    blocking = httpx.MockTransport(lambda r: (
+        httpx.Response(200, text="User-agent: *\nDisallow: /w/\nDisallow: /api/\n")
+        if "robots.txt" in str(r.url)
+        else httpx.Response(200, json=WIKI_JSON)))
+    rf = Fetcher("watchtower-test/0.1", delay=0.0, transport=blocking)
+    ok &= check("a declared API endpoint is fetched despite robots.txt",
+                rf.get("https://en.wikipedia.org/w/api.php?x=1", api=True).ok)
+    ok &= check("crawling the same path still obeys robots.txt",
+                not rf.get("https://en.wikipedia.org/w/api.php?x=1").ok)
+    ok &= check("and the refusal says why",
+                "robots" in rf.get("https://en.wikipedia.org/w/index.php").error)
+    ok &= check("wikipedia backend now returns hits through robots.txt",
+                len(wikipedia(QUERY, rf, limit=3)) == 1)
+    rf.close()
+
+    print("\nblocked is not the same as empty")
+    dead = httpx.MockTransport(lambda r: (
+        httpx.Response(200, text="User-agent: *\nAllow: /\n")
+        if "robots.txt" in str(r.url) else httpx.Response(429, text="slow down")))
+    df = Fetcher("watchtower-test/0.1", delay=0.0, transport=dead)
+    try:
+        gdelt(QUERY, df, hours=24, limit=5)
+        ok &= check("a rate-limited source raises instead of returning []", False)
+    except SourceError as e:
+        ok &= check("a rate-limited source raises instead of returning []", True)
+        ok &= check("and carries the real reason", "429" in str(e))
+    try:
+        opensanctions(QUERY, df)
+        ok &= check("an unconfigured source reports as unsearched", False)
+    except SourceSkipped as e:
+        ok &= check("an unconfigured source reports as unsearched",
+                    "OPENSANCTIONS_API_KEY" in str(e))
+
+    broke = sweep(QUERY, df, hours=24, backends=["gdelt", "opensanctions"],
+                  fetch_bodies=False)
+    ok &= check("sweep separates failure from a genuine zero",
+                broke.failed and "gdelt" in broke.failed)
+    ok &= check("sweep separates unsearched from a genuine zero",
+                "opensanctions" in broke.skipped)
+    ok &= check("an incomplete sweep knows it is incomplete", not broke.complete)
+    ok &= check("the empty report refuses to claim nothing was found",
+                "INCOMPLETE" in report.terminal(broke))
+    df.close()
+
+    print("\nfailure handling")
+    bad = sweep("nothing matches here", fetcher, hours=24,
+                backends=["gdelt", "nonexistent_backend"], fetch_bodies=False)
+    ok &= check("unknown backend recorded, doesn't crash",
+                any("unknown backend" in e for e in bad.errors))
+    ok &= check("empty result renders a helpful message",
+                "Nothing found" in report.terminal(
+                    type(bad)(query="zzz", items=[])))
+
+    fetcher.close()
+    print("\n" + ("ALL CHECKS PASSED" if ok else "SOME CHECKS FAILED"))
+
+    if "--show" in sys.argv:
+        print("\n" + "=" * 70)
+        print("Sample output (from the mocked fixtures above):")
+        print("=" * 70)
+        print(term)
+    else:
+        print("\n(run with --show to see the rendered report)\n")
+    return 0 if ok else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
