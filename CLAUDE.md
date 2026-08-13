@@ -4,14 +4,19 @@ Context for Claude Code sessions in this repo. Read this before changing anythin
 
 ## What this is
 
-**Two separate tools in one repo.** They share the Python environment, the
-`.env`, and the house style — nothing else. No shared imports, no shared
-database, no shared config. Read the section for the one you're working on.
+**Two separate engines behind one front door.** They share the Python
+environment, the `.env`, the house style, and — since the merge — the web UI,
+which has a watchtower side and a scamscan side. Nothing below that is shared:
+no shared database, no shared config, and the dependency runs one way only.
+`web/app.py` imports both; **`scamscan.py` imports nothing from `core/`, and
+`core/` imports nothing from `scamscan`**. A shared front door is not a shared
+engine, and the moment one tool reaches into the other's store or config that
+stops being true. Read the section for the one you're working on.
 
 | | **watchtower** | **scamscan** |
 |---|---|---|
 | Question | "what is being said about X?" | "who is running scams against brand X?" |
-| Entry | `run.py` (+ web UI) | `scamscan.py` |
+| Entry | `run.py` (+ web UI: Sweep, Archive) | `scamscan.py` (+ web UI: Queue, Score) |
 | Config | `config.yaml` | `config.json` |
 | Store | `watchtower.db` | `scamscan.db` |
 | Docs | `README.md` | `SCAMSCAN.md` |
@@ -84,6 +89,19 @@ web/
   app.py       FastAPI, SSE streaming
   static/      index.html, style.css, app.js — no build step, no framework
 ```
+
+The web layer serves both sides. Routes under `/api/scamscan/*` are the only
+place the two meet, and they go through `scamscan`'s public functions
+(`hunt`, `score_finding`, `db_connect`, `upsert`) rather than reaching into its
+internals. `hunt()` takes a `progress(dict)` callback for exactly the same
+reason `sweep()` does: the CLI renders the dicts as lines, `/api/scamscan/hunt`
+forwards them as SSE frames, and neither owns the format.
+
+Note the event vocabulary differs by design. A per-query failure is
+`unsearched`, not `failed` — `failed` is the stream-level fatal event on both
+sides, and a query that could not run is a normal, expected outcome that must
+still be visible. Rendering those the same way is the bug the whole tool exists
+to prevent.
 
 scamscan is deliberately flat — one file, no package. It shares nothing with
 `core/` and must not import from it:

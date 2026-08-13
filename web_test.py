@@ -213,6 +213,148 @@ def main():
                     not webapp_reloaded.SERVERLESS
                     and webapp_reloaded.EPHEMERAL is False)
 
+    print("\nscamscan side — read-only surface")
+    import tempfile
+    import types
+
+    import scamscan
+    from scamscan_test import Block, FakeClient, Resp, text_resp
+
+    scam_dir = Path(tempfile.mkdtemp(prefix="scamscan_test_"))
+    saved_dir = webapp.DATA_DIR
+    webapp.DATA_DIR = scam_dir
+    try:
+        r = client.get("/api/scamscan/status")
+        st = r.json()
+        ok &= check("status serves", r.status_code == 200)
+        ok &= check("it names the brand it is configured for", bool(st["brand"]))
+        ok &= check("and reports the lexicon it will score with",
+                    st["lexicon_terms"] > 0 and st["counter_terms"] > 0)
+        ok &= check("and which search tool the model actually gets",
+                    "web_search_20" in st["search_tool"])
+        ok &= check("and whether a hunt can run at all",
+                    st["api_available"] == bool(os.environ.get("ANTHROPIC_API_KEY")))
+
+        r = client.get("/api/scamscan/queue")
+        ok &= check("an empty queue is an empty list, not an error",
+                    r.status_code == 200 and r.json()["items"] == [])
+        ok &= check("an unknown disposition is rejected",
+                    client.get("/api/scamscan/queue?disposition=hax").status_code == 400)
+
+        # Seed one finding through scamscan's own writer, so the test exercises
+        # the same rows a real hunt produces rather than a hand-built fixture.
+        cfg = json.loads((Path(__file__).parent / "config.json").read_text())
+        finding = {"url": "http://mpesa-verify.co.ke/login", "title": "verify now",
+                   "scam_type": "phishing", "summary": "Send your PIN to unlock",
+                   "quoted_evidence": "send your pin", "model_confidence": 0.9}
+        con = scamscan.db_connect(str(scam_dir / "scamscan.db"))
+        scored = scamscan.score_finding(finding, cfg)
+        scamscan.upsert(con, finding, scored, "q")
+        con.commit()
+        con.close()
+        fp = scamscan.fingerprint(finding)
+
+        d = client.get("/api/scamscan/queue?min_score=0").json()
+        ok &= check("a stored finding comes back", len(d["items"]) == 1)
+        item = d["items"][0]
+        ok &= check("with a band on the shared relevance ramp",
+                    item["band"] in {"HIGH", "MED", "LOW", "WEAK"})
+        ok &= check("and the breakdown, so the score can be explained",
+                    item["breakdown"]["lexicon_hits"]
+                    and "scored_on" in item["breakdown"])
+        ok &= check("min_score filters it out when set above the score",
+                    client.get("/api/scamscan/queue?min_score=99").json()["items"] == [])
+
+        r = client.post("/api/scamscan/dispose",
+                        json={"fingerprint": fp, "verdict": "confirmed",
+                              "note": "checked"})
+        ok &= check("a verdict saves", r.status_code == 200)
+        after = client.get("/api/scamscan/queue?min_score=0&disposition=confirmed").json()
+        ok &= check("and moves the finding out of the new queue",
+                    len(after["items"]) == 1
+                    and after["items"][0]["analyst_note"] == "checked"
+                    and client.get("/api/scamscan/queue?min_score=0").json()["items"] == [])
+        ok &= check("an invalid verdict is rejected",
+                    client.post("/api/scamscan/dispose",
+                                json={"fingerprint": fp, "verdict": "drop"}
+                                ).status_code == 400)
+        # Silently accepting a verdict for a row that isn't there would tell an
+        # analyst their decision was recorded when nothing was written.
+        ok &= check("a verdict for an unknown finding is a 404, not a no-op",
+                    client.post("/api/scamscan/dispose",
+                                json={"fingerprint": "nope", "verdict": "confirmed"}
+                                ).status_code == 404)
+
+        print("\nscoring in the browser costs nothing and calls nothing")
+        r = client.post("/api/scamscan/score",
+                        json={"text": "New M-PESA balance is Ksh(*LOCKED*). Pay to POCHI.",
+                              "url": "http://mpesa-verify.co.ke/login"})
+        s = r.json()
+        ok &= check("it scores", r.status_code == 200 and s["score"] > 0)
+        ok &= check("every hit carries the source it came from",
+                    all("[" in h for h in s["lexicon_hits"]))
+        ok &= check("an absent model confidence is reported as absent, not zero",
+                    s["model_score"] is None and "model" not in s["scored_on"])
+        ok &= check("and an explicit one is included",
+                    "model" in client.post("/api/scamscan/score",
+                                           json={"text": "x", "url": "y",
+                                                 "model_confidence": 0.5}
+                                           ).json()["scored_on"])
+        ok &= check("an empty request is rejected rather than scored as clean",
+                    client.post("/api/scamscan/score",
+                                json={"text": "", "url": ""}).status_code == 400)
+
+        print("\nhunt streams, and a query that never ran says so")
+        saved_key = os.environ.get("ANTHROPIC_API_KEY")
+        os.environ["ANTHROPIC_API_KEY"] = "test-key"
+        saved_anthropic = scamscan.anthropic
+
+        class Err:
+            type = "web_search_tool_result_error"
+            error_code = "too_many_requests"
+
+        script = [
+            Resp([Block("text", text='{"queries": ["one", "two"]}')]),
+            text_resp({"findings": [finding]}),
+            Resp([Block("web_search_tool_result", content=Err()),
+                  Block("text", text='{"findings": []}')]),
+        ]
+        scamscan.anthropic = types.SimpleNamespace(Anthropic=lambda: FakeClient(*script))
+        try:
+            with client.stream("GET", "/api/scamscan/hunt?topics=1") as resp:
+                events = parse_sse("".join(resp.iter_text()))
+        finally:
+            scamscan.anthropic = saved_anthropic
+            if saved_key is None:
+                os.environ.pop("ANTHROPIC_API_KEY", None)
+            else:
+                os.environ["ANTHROPIC_API_KEY"] = saved_key
+
+        names = [n for n, _ in events]
+        ok &= check("the stream opens with what it is about to spend on",
+                    names[0] == "start")
+        ok &= check("topics and queries stream as they run",
+                    "topic" in names and "query" in names)
+        ok &= check("findings stream one at a time", "finding" in names)
+        # The whole point: a rate-limited query and a clean query must not
+        # arrive on the same event.
+        ok &= check("a query that could not be searched gets its own event",
+                    "unsearched" in names)
+        ok &= check("exactly one terminal frame closes the stream",
+                    names.count("done") == 1 and names[-1] == "done")
+        done = dict(events)["done"]
+        ok &= check("the summary carries the failures, not just the count",
+                    len(done["failures"]) == 1 and done["complete"] is False)
+        ok &= check("and enough to state the cost that was incurred",
+                    done["queries_run"] == 1 and "model" in done)
+
+        r = client.get("/api/scamscan/hunt?topics=99")
+        ok &= check("topics is capped so one click cannot spend unboundedly",
+                    r.status_code == 422)
+    finally:
+        webapp.DATA_DIR = saved_dir
+        shutil.rmtree(scam_dir, ignore_errors=True)
+
     print("\nfrontend wiring")
     import re
     static = Path(__file__).parent / "web" / "static"
@@ -263,6 +405,47 @@ def main():
                 "s.available !== false" in js)
     for cls in (".lane.skipped", ".summary .warn"):
         ok &= check(f"{cls} is styled", cls in css)
+
+    print("\ntwo sides, one page")
+    sides = set(re.findall(r'data-side="(\w+)"', html))
+    ok &= check("the nav declares both tools", sides == {"watchtower", "scamscan"})
+    tab_views = set(re.findall(r'class="tab[^"]*" data-view="(\w+)"', html))
+    ok &= check("every tab has a section to show",
+                all(f"view-{v}" in html_ids for v in tab_views))
+    ok &= check("and the switcher knows all four",
+                re.search(r'VIEWS\s*=\s*\[([^\]]+)\]', js)
+                and tab_views <= set(re.findall(
+                    r'"(\w+)"', re.search(r'VIEWS\s*=\s*\[([^\]]+)\]', js).group(1))))
+    ok &= check("the rail names the side you are on",
+                'id="rail-name"' in html and "#rail-name" in js)
+    for cls in (".side-group", ".side-label"):
+        ok &= check(f"{cls} is styled", cls in css)
+
+    # The hunt stream has its own event vocabulary; a rename here fails the same
+    # silent way a sweep rename would — the log just stays empty.
+    for ev in ("start", "topic", "query", "finding", "unsearched", "note"):
+        ok &= check(f"the hunt log handles the {ev!r} event",
+                    f'addEventListener("{ev}"' in js)
+    ok &= check("an unsearched query is styled apart from a finding",
+                ".log-fail" in css and ".log-find" in css)
+    # Same argument as the sweep's failed lane, one screen over: an absent
+    # family must not be drawn as a zero-width bar that reads as a zero score.
+    ok &= check("an absent scoring family is drawn as absent, not as zero",
+                ".fam.absent" in css and '"absent"' in js
+                and "No fill element at all" in js)
+    ok &= check("lexicon provenance reaches the page", ".hit-src" in css)
+    ok &= check("counter terms are visually distinct from hits",
+                ".hit.is-counter" in css)
+    ok &= check("a failed verdict save is surfaced on the card",
+                re.search(r"Not saved", js) is not None)
+    ok &= check("an empty queue does not read as a clean brand",
+                "not about the brand" in js and ".empty-inline" in css)
+    ok &= check("the hunt states its cost before it is clicked",
+                "searches per topic" in js)
+    for sel in (".evidence", ".reason", ".hit"):
+        ok &= check(f"{sel} can break an unbreakable string",
+                    re.search(re.escape(sel) + r"[^{]*\{[^}]*overflow-wrap:\s*anywhere",
+                              css) is not None)
 
     print("\n" + ("ALL CHECKS PASSED" if ok else "SOME CHECKS FAILED") + "\n")
     return 0 if ok else 1

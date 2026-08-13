@@ -20,7 +20,7 @@ from dataclasses import asdict
 from pathlib import Path
 
 import yaml
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import Body, FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -30,6 +30,12 @@ from core.fetch import Fetcher
 from core.sources import BACKENDS, DEFAULT_BACKENDS
 from core.store import Store
 from core.sweep import sweep
+
+# The two tools stay independent of each other; only this layer knows about
+# both. scamscan still imports nothing from core/, and core/ imports nothing
+# from scamscan — a shared front door is not a shared engine, and the moment
+# one starts reaching into the other's store or config that stops being true.
+import scamscan
 
 ROOT = Path(__file__).resolve().parent.parent
 STATIC = Path(__file__).resolve().parent / "static"
@@ -281,6 +287,223 @@ def archive(q: str = Query(..., min_length=1), limit: int = Query(30, le=100)):
          "published_at": r["published_at"]}
         for r in rows
     ]}
+
+
+# -------------------------------------------------------------- scamscan
+
+SCAMSCAN_CONFIG = ROOT / "config.json"
+
+
+def scamscan_config() -> dict:
+    try:
+        return json.loads(SCAMSCAN_CONFIG.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        raise HTTPException(503, "config.json is missing — scamscan is not configured")
+    except json.JSONDecodeError as e:
+        raise HTTPException(503, f"config.json is not valid JSON: {e}")
+
+
+def scam_band(score, cfg) -> str:
+    """Map a score onto the shared relevance ramp.
+
+    The thresholds already mean something — review_threshold is "an analyst
+    should look", auto_escalate_threshold is "look now" — so the colour carries
+    the same meaning it does on the watchtower side rather than being decoration.
+    """
+    sc = cfg["scoring"]
+    if score >= sc["auto_escalate_threshold"]:
+        return "HIGH"
+    if score >= sc["review_threshold"]:
+        return "MED"
+    if score >= sc["review_threshold"] / 2:
+        return "LOW"
+    return "WEAK"
+
+
+@app.get("/api/scamscan/status")
+def scamscan_status():
+    cfg = scamscan_config()
+    _, tool_note = scamscan.web_search_tool(cfg)
+    lex = cfg["lexicon"]
+    unverified = sum(1 for group in lex.values() for entry in group.values()
+                     if scamscan.term_weight(entry)[1] in ("", "UNVERIFIED"))
+    con = scamscan.db_connect(str(data_path("scamscan.db")))
+    try:
+        rows = dict(con.execute(
+            "SELECT disposition, COUNT(*) FROM findings GROUP BY disposition"
+        ).fetchall())
+    finally:
+        con.close()
+    return {
+        "brand": cfg["brand"]["name"],
+        "topics": len(cfg["seed_topics"]),
+        "queries_per_topic": cfg["search"]["queries_per_topic"],
+        "max_uses_per_query": cfg["search"]["max_uses_per_query"],
+        "model": cfg["search"]["model"],
+        "search_tool": tool_note,
+        "structured_outputs": bool(cfg["search"].get("structured_outputs", True)),
+        "review_threshold": cfg["scoring"]["review_threshold"],
+        "escalate_threshold": cfg["scoring"]["auto_escalate_threshold"],
+        "lexicon_terms": sum(len(g) for g in lex.values()),
+        "counter_terms": len(cfg.get("counter_terms", {})),
+        "unverified_terms": unverified,
+        # hunt spends money; the UI disables the button rather than letting
+        # someone click it and read a 500 as "no scams found".
+        "api_available": bool(os.environ.get("ANTHROPIC_API_KEY")),
+        "ephemeral_storage": EPHEMERAL,
+        "queue": rows,
+        "total": sum(rows.values()),
+    }
+
+
+@app.get("/api/scamscan/queue")
+def scamscan_queue(
+    min_score: float = Query(0, ge=0, le=100),
+    disposition: str = Query("new"),
+    limit: int = Query(50, ge=1, le=200),
+):
+    cfg = scamscan_config()
+    allowed = {"new", "confirmed", "false_positive", "unclear", "escalated", "all"}
+    if disposition not in allowed:
+        raise HTTPException(400, f"disposition must be one of {sorted(allowed)}")
+
+    sql = ("SELECT fingerprint, score, scam_type, url, title, summary, evidence, "
+           "times_seen, disposition, analyst_note, first_seen, last_seen, breakdown "
+           "FROM findings WHERE score >= ?")
+    params = [min_score]
+    if disposition != "all":
+        sql += " AND disposition = ?"
+        params.append(disposition)
+    sql += " ORDER BY score DESC LIMIT ?"
+    params.append(limit)
+
+    con = scamscan.db_connect(str(data_path("scamscan.db")))
+    try:
+        rows = con.execute(sql, params).fetchall()
+    finally:
+        con.close()
+
+    items = []
+    for (fp, score, stype, url, title, summary, evidence, seen, disp, note,
+         first, last, breakdown) in rows:
+        try:
+            detail = json.loads(breakdown or "{}")
+        except json.JSONDecodeError:
+            detail = {}
+        items.append({
+            "fingerprint": fp, "score": score, "band": scam_band(score or 0, cfg),
+            "scam_type": stype, "url": url, "title": title, "summary": summary,
+            "evidence": evidence, "times_seen": seen, "disposition": disp,
+            "analyst_note": note, "first_seen": first, "last_seen": last,
+            "breakdown": detail,
+        })
+    return {"items": items, "ephemeral_storage": EPHEMERAL}
+
+
+@app.post("/api/scamscan/dispose")
+def scamscan_dispose(payload: dict = Body(...)):
+    verdicts = {"confirmed", "false_positive", "unclear", "escalated", "new"}
+    fingerprint = str(payload.get("fingerprint", "")).strip()
+    verdict = str(payload.get("verdict", "")).strip()
+    note = str(payload.get("note", ""))[:2000]
+    if not fingerprint:
+        raise HTTPException(400, "fingerprint is required")
+    if verdict not in verdicts:
+        raise HTTPException(400, f"verdict must be one of {sorted(verdicts)}")
+
+    con = scamscan.db_connect(str(data_path("scamscan.db")))
+    try:
+        cur = con.execute(
+            "UPDATE findings SET disposition=?, analyst_note=? WHERE fingerprint=?",
+            (verdict, note, fingerprint))
+        con.commit()
+        if not cur.rowcount:
+            raise HTTPException(404, "no finding with that fingerprint")
+    finally:
+        con.close()
+    return {"fingerprint": fingerprint, "verdict": verdict, "note": note}
+
+
+@app.post("/api/scamscan/score")
+def scamscan_score(payload: dict = Body(...)):
+    """Score pasted text with no API call at all — the `test` command, in a page.
+
+    Free and deterministic, which makes it the right place to tune weights and
+    to see why a page scored what it did before spending anything on a hunt.
+    """
+    cfg = scamscan_config()
+    text = str(payload.get("text", ""))[:20000]
+    url = str(payload.get("url", ""))[:2000]
+    if not text.strip() and not url.strip():
+        raise HTTPException(400, "give it some text or a URL to score")
+
+    finding = {"url": url, "title": "", "summary": text, "quoted_evidence": text}
+    raw = payload.get("model_confidence")
+    if raw not in (None, ""):
+        finding["model_confidence"] = raw
+
+    scored = scamscan.score_finding(finding, cfg)
+    return {
+        **scored,
+        "band": scam_band(scored["score"], cfg),
+        "review_threshold": cfg["scoring"]["review_threshold"],
+        "escalate_threshold": cfg["scoring"]["auto_escalate_threshold"],
+    }
+
+
+@app.get("/api/scamscan/hunt")
+def scamscan_hunt(topics: int = Query(1, ge=1, le=20)):
+    """Run a discovery pass, streaming the same progress dicts the CLI prints.
+
+    Costs real money per query — web search is billed separately from tokens —
+    so `topics` is capped and the UI states the ceiling before you click.
+    """
+    cfg = scamscan_config()
+    if not os.environ.get("ANTHROPIC_API_KEY"):
+        raise HTTPException(503, "ANTHROPIC_API_KEY is not set — a hunt needs it")
+
+    events: queue.Queue = queue.Queue()
+    holder: dict = {}
+
+    def work():
+        con = None
+        try:
+            con = scamscan.db_connect(str(data_path("scamscan.db")))
+            holder["summary"] = scamscan.hunt(
+                scamscan.anthropic.Anthropic(), cfg, con, topics, events.put)
+        except Exception as e:
+            holder["error"] = f"{type(e).__name__}: {e}"
+        finally:
+            if con:
+                con.close()
+            events.put(None)
+
+    threading.Thread(target=work, daemon=True).start()
+
+    def stream():
+        while True:
+            event = events.get()
+            if event is None:
+                break
+            # `done` is emitted by hunt() itself; hold it back so the browser
+            # only ever sees one terminal frame, from whichever path ends first.
+            if event.get("type") == "done":
+                holder.setdefault("summary", event)
+                continue
+            yield _sse(event.get("type", "progress"), event)
+
+        if "error" in holder:
+            yield _sse("failed", {"message": holder["error"]})
+            return
+        summary = dict(holder.get("summary", {}))
+        summary["ephemeral_storage"] = EPHEMERAL
+        yield _sse("done", summary)
+
+    return StreamingResponse(
+        stream(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 @app.get("/api/report/{name}")

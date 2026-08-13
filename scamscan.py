@@ -622,8 +622,9 @@ def expand_queries(client, cfg, topic, state=None):
     return queries[: cfg["search"]["queries_per_topic"]]
 
 
-def hunt_query(client, cfg, query, state=None):
+def hunt_query(client, cfg, query, state=None, progress=None):
     state = state or RunState()
+    progress = progress or (lambda e: None)
     s = cfg["search"]
     tool, state.tool_note = web_search_tool(cfg)
 
@@ -650,9 +651,84 @@ def hunt_query(client, cfg, query, state=None):
     if stop == "pause_turn":
         # The server-side tool loop hit its iteration cap. Whatever came back is
         # real but partial — say so rather than reporting it as a full sweep.
-        print(f"    ! search paused before finishing (partial results: "
-              f"{len(findings)} finding(s)) — consider lowering max_uses_per_query")
+        progress({"type": "note", "message": (
+            f"search paused before finishing (partial results: {len(findings)} "
+            f"finding(s)) — consider lowering max_uses_per_query")})
     return findings
+
+
+# --------------------------------------------------------------------------
+# The run
+# --------------------------------------------------------------------------
+
+
+def hunt(client, cfg, con, topics=None, progress=None, state=None):
+    """One discovery pass. Returns a summary; reports as it goes via progress().
+
+    progress(dict) is the same contract as watchtower's sweep(): the CLI renders
+    the dicts as lines, the web layer forwards them as SSE frames, and neither
+    owns the format. Add a field rather than changing an existing one.
+    """
+    progress = progress or (lambda e: None)
+    state = state or RunState()
+    _, tool_note = web_search_tool(cfg)
+    seeds = cfg["seed_topics"][:topics] if topics else cfg["seed_topics"]
+
+    summary = {"seen": 0, "new": 0, "queries_run": 0, "failures": [],
+               "topics": len(seeds), "tool": tool_note,
+               "model": cfg["search"]["model"],
+               "structured": bool(cfg["search"].get("structured_outputs", True)),
+               "escalated": 0}
+    progress({"type": "start", **summary})
+
+    for topic in seeds:
+        progress({"type": "topic", "topic": topic})
+        try:
+            queries = expand_queries(client, cfg, topic, state)
+        except Exception as e:
+            reason = f"topic {topic!r}: expansion failed: {e}"
+            summary["failures"].append(reason)
+            progress({"type": "unsearched", "scope": "topic", "topic": topic,
+                      "reason": str(e)})
+            continue
+
+        for q in queries:
+            progress({"type": "query", "query": q})
+            try:
+                findings = hunt_query(client, cfg, q, state, progress)
+            except HuntError as e:
+                summary["failures"].append(f"{q!r}: {e}")
+                progress({"type": "unsearched", "scope": "query", "query": q,
+                          "reason": str(e), "searched": False})
+                continue
+            except Exception as e:
+                summary["failures"].append(f"{q!r}: {type(e).__name__}: {e}")
+                progress({"type": "unsearched", "scope": "query", "query": q,
+                          "reason": f"{type(e).__name__}: {e}", "searched": False})
+                continue
+            summary["queries_run"] += 1
+
+            for f in findings:
+                scored = score_finding(f, cfg)
+                is_new = upsert(con, f, scored, q)
+                summary["seen"] += 1
+                summary["new"] += is_new
+                escalate = scored["score"] >= cfg["scoring"]["auto_escalate_threshold"]
+                summary["escalated"] += bool(escalate)
+                progress({"type": "finding", "new": bool(is_new),
+                          "escalate": bool(escalate), "score": scored["score"],
+                          "url": f.get("url", ""), "title": f.get("title", ""),
+                          "scam_type": f.get("scam_type", "unknown"),
+                          "fingerprint": fingerprint(f)})
+            con.commit()
+
+    con.commit()
+    summary["structured_disabled"] = state.structured_disabled
+    # An empty queue is a claim about the brand. Only make it when the searches
+    # actually ran, so the caller can tell the two apart without re-deriving it.
+    summary["complete"] = not summary["failures"] and summary["queries_run"] > 0
+    progress({"type": "done", **summary})
+    return summary
 
 
 # --------------------------------------------------------------------------
@@ -666,71 +742,47 @@ def cmd_hunt(args):
         sys.exit("ANTHROPIC_API_KEY is not set.")
     client = anthropic.Anthropic()
     con = db_connect(args.db)
-    state = RunState()
 
-    _, tool_note = web_search_tool(cfg)
-    print(f"model {cfg['search']['model']} | search tool {tool_note} | "
-          f"structured outputs "
-          f"{'on' if cfg['search'].get('structured_outputs', True) else 'off'}")
+    def render(e):
+        kind = e["type"]
+        if kind == "start":
+            print(f"model {e['model']} | search tool {e['tool']} | "
+                  f"structured outputs {'on' if e['structured'] else 'off'}")
+        elif kind == "topic":
+            print(f"\n[topic] {e['topic']}")
+        elif kind == "query":
+            print(f"  [query] {e['query']}")
+        elif kind == "note":
+            print(f"    ! {e['message']}")
+        elif kind == "unsearched":
+            label = "expansion failed" if e["scope"] == "topic" else "NOT SEARCHED"
+            print(f"  {'' if e['scope'] == 'topic' else '  '}! {label}: {e['reason']}")
+        elif kind == "finding":
+            flag = "NEW " if e["new"] else "dup "
+            print(f"    {flag}{'!!' if e['escalate'] else '  '} "
+                  f"{e['score']:>5.1f}  {e['url'][:70]}")
 
-    topics = cfg["seed_topics"][: args.topics] if args.topics else cfg["seed_topics"]
-    new_total = seen_total = 0
-    queries_run = 0
-    failures = []
+    summary = hunt(client, cfg, con, args.topics, render)
 
-    for topic in topics:
-        print(f"\n[topic] {topic}")
-        try:
-            queries = expand_queries(client, cfg, topic, state)
-        except Exception as e:
-            print(f"  ! expansion failed: {e}")
-            failures.append(f"topic {topic!r}: expansion failed: {e}")
-            continue
+    print(f"\n{summary['seen']} findings processed, {summary['new']} new. "
+          f"Stored in {args.db}")
 
-        for q in queries:
-            print(f"  [query] {q}")
-            try:
-                findings = hunt_query(client, cfg, q, state)
-            except HuntError as e:
-                print(f"    ! NOT SEARCHED: {e}")
-                failures.append(f"{q!r}: {e}")
-                continue
-            except Exception as e:
-                print(f"    ! search failed: {e}")
-                failures.append(f"{q!r}: {type(e).__name__}: {e}")
-                continue
-            queries_run += 1
-
-            for f in findings:
-                scored = score_finding(f, cfg)
-                is_new = upsert(con, f, scored, q)
-                seen_total += 1
-                new_total += is_new
-                flag = "NEW " if is_new else "dup "
-                mark = "!!" if scored["score"] >= cfg["scoring"]["auto_escalate_threshold"] else "  "
-                print(f"    {flag}{mark} {scored['score']:>5.1f}  {f.get('url','')[:70]}")
-            con.commit()
-
-    con.commit()
-    print(f"\n{seen_total} findings processed, {new_total} new. Stored in {args.db}")
-
-    if state.structured_disabled:
+    if summary["structured_disabled"]:
         print("\n!! Structured outputs were rejected and this run parsed model "
               "text instead.\n   Findings are still real, but the schema did not "
               "enforce the shape, so a\n   missing model_confidence is possible "
               "again. Set search.structured_outputs\n   to false in the config to "
               "stop retrying, or see SCAMSCAN.md.")
 
-    # An empty queue is a claim about the brand. Only make it when the searches
-    # actually ran — otherwise say plainly that coverage was incomplete.
+    failures = summary["failures"]
     if failures:
         print(f"\n!! INCOMPLETE RUN — {len(failures)} of "
-              f"{queries_run + len(failures)} queries did not search:")
+              f"{summary['queries_run'] + len(failures)} queries did not search:")
         for f in failures[:10]:
             print(f"   - {f}")
-        if seen_total == 0:
+        if summary["seen"] == 0:
             print("\n   Zero findings here does NOT mean the brand is clean.")
-    elif queries_run == 0:
+    elif summary["queries_run"] == 0:
         print("\n!! No queries ran at all — check the config and API key.")
 
 

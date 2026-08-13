@@ -17,11 +17,19 @@
 <header class="rail">
   <div class="rail-mark">
     <span class="pip" aria-hidden="true"></span>
-    <span class="rail-name">WATCHTOWER</span>
+    <span class="rail-name" id="rail-name">WATCHTOWER</span>
   </div>
   <nav class="rail-nav">
-    <button class="tab is-on" data-view="sweep">Sweep</button>
-    <button class="tab" data-view="archive">Archive</button>
+    <div class="side-group" data-side="watchtower">
+      <span class="side-label">watchtower</span>
+      <button class="tab is-on" data-view="sweep" data-side="watchtower">Sweep</button>
+      <button class="tab" data-view="archive" data-side="watchtower">Archive</button>
+    </div>
+    <div class="side-group" data-side="scamscan">
+      <span class="side-label">scamscan</span>
+      <button class="tab" data-view="queue" data-side="scamscan">Queue</button>
+      <button class="tab" data-view="score" data-side="scamscan">Score</button>
+    </div>
   </nav>
   <div class="rail-status" id="ai-status" title="Relevance scoring status"></div>
 </header>
@@ -114,6 +122,80 @@
     </p>
   </form>
   <div class="findings" id="archive-results"></div>
+</section>
+
+<!-- ============================ QUEUE ============================ -->
+<section id="view-queue" hidden>
+
+  <form class="console" id="hunt-form" autocomplete="off">
+    <label class="field-label" for="topics">Hunt for scams against <span id="brand-name">the brand</span></label>
+    <div class="field">
+      <input id="topics" type="number" min="1" max="20" value="1"
+             aria-describedby="hunt-hint">
+      <button type="submit" id="hunt-go">Run hunt</button>
+    </div>
+    <p class="hint" id="hunt-hint">
+      Seed topics to expand, cheapest first. Web search is billed separately
+      from tokens — start with one.
+    </p>
+    <p class="hint warn-note" id="hunt-cost" hidden></p>
+  </form>
+
+  <section class="trace" id="hunt-trace" hidden aria-live="polite">
+    <div class="trace-head">
+      <span class="trace-title" id="hunt-title">Hunting</span>
+      <span class="trace-stage" id="hunt-stage"></span>
+    </div>
+    <div class="hunt-log" id="hunt-log"></div>
+  </section>
+
+  <form class="console" id="queue-form" autocomplete="off">
+    <div class="controls">
+      <fieldset class="control">
+        <legend>Minimum score</legend>
+        <div class="segmented" id="min-score" role="radiogroup" aria-label="Minimum score">
+          <button type="button" role="radio" data-s="0">all</button>
+          <button type="button" role="radio" data-s="45" class="is-on" aria-checked="true">review</button>
+          <button type="button" role="radio" data-s="80">escalate</button>
+        </div>
+      </fieldset>
+      <fieldset class="control">
+        <legend>Disposition</legend>
+        <div class="segmented" id="disposition" role="radiogroup" aria-label="Disposition">
+          <button type="button" role="radio" data-d="new" class="is-on" aria-checked="true">new</button>
+          <button type="button" role="radio" data-d="escalated">escalated</button>
+          <button type="button" role="radio" data-d="confirmed">confirmed</button>
+          <button type="button" role="radio" data-d="all">all</button>
+        </div>
+      </fieldset>
+    </div>
+    <p class="hint">
+      The queue holds phone numbers, till numbers and names taken from live
+      pages — personal data. Confirm your lawful basis and retention limit
+      before working through it.
+    </p>
+  </form>
+
+  <div class="findings" id="queue-results"></div>
+</section>
+
+<!-- ============================ SCORE ============================ -->
+<section id="view-score" hidden>
+  <form class="console" id="score-form" autocomplete="off">
+    <label class="field-label" for="score-text">Score a page offline — no API call, no cost</label>
+    <textarea id="score-text" rows="5" spellcheck="false"
+              placeholder="Paste the page copy. Try: Confirmed. You have received Ksh2,530.00. New M-PESA balance is Ksh(*LOCKED*). Pay to POCHI TODAY."></textarea>
+    <div class="field">
+      <input id="score-url" type="text" spellcheck="false"
+             placeholder="http://mpesa-verify.co.ke/login">
+      <button type="submit">Score</button>
+    </div>
+    <p class="hint">
+      The same code a hunt uses. Every lexicon hit shows the source it was
+      taken from, so you can see why a page scored what it did.
+    </p>
+  </form>
+  <div id="score-out"></div>
 </section>
 
 </main>

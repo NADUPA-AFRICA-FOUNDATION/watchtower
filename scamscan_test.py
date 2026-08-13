@@ -10,6 +10,7 @@ silent failure is a false negative someone acts on.
 
 import io
 import json
+import sqlite3
 import sys
 from contextlib import redirect_stdout
 from pathlib import Path
@@ -18,7 +19,8 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from scamscan import (DYNAMIC_FILTERING_MODELS, FINDINGS_SCHEMA,
                       QUERIES_SCHEMA, WEB_SEARCH_BASIC, WEB_SEARCH_DYNAMIC,
-                      HuntError, RunState, expand_queries, extract_artifacts,
+                      HuntError, RunState, db_connect, expand_queries,
+                      extract_artifacts, hunt,
                       fingerprint, hunt_query, impersonation_score,
                       lexicon_score, lint_schema, parse_json_array,
                       parse_payload, registrable, score_finding,
@@ -362,9 +364,37 @@ def main():
 
     state = RunState()
     client = FakeClient(text_resp({"findings": [FINDING]}, stop_reason="pause_turn"))
-    found, out = quiet(hunt_query, client, CFG, "q", state)
+    events = []
+    found = hunt_query(client, CFG, "q", state, events.append)
     ok &= check("a paused turn returns its partial results", len(found) == 1)
-    ok &= check("and says the results are partial", "partial" in out)
+    ok &= check("and reports through progress() that they are partial",
+                any(e["type"] == "note" and "partial" in e["message"]
+                    for e in events))
+
+    print("\nhunt() reports as it goes, so the CLI and the web layer agree")
+    script = [Resp([Block("text", text='{"queries": ["a", "b"]}')]),
+              text_resp({"findings": [FINDING]}),
+              Resp([Block("web_search_tool_result", content=Err("too_many_requests")),
+                    Block("text", text='{"findings": []}')])]
+    con = sqlite3.connect(":memory:")
+    events = []
+    summary = hunt(FakeClient(*script), CFG, db_connect(":memory:"), 1, events.append)
+    kinds = [e["type"] for e in events]
+    ok &= check("it opens with what the run is about to do", kinds[0] == "start")
+    ok &= check("and closes with exactly one done", kinds.count("done") == 1)
+    ok &= check("topics, queries and findings each get an event",
+                {"topic", "query", "finding"} <= set(kinds))
+    ok &= check("a query that never searched is 'unsearched', not 'failed'",
+                "unsearched" in kinds and "failed" not in kinds)
+    ok &= check("the summary counts only the queries that ran",
+                summary["queries_run"] == 1 and len(summary["failures"]) == 1)
+    ok &= check("and refuses to call the run complete", summary["complete"] is False)
+    clean = hunt(FakeClient(Resp([Block("text", text='{"queries": ["a"]}')]),
+                            text_resp({"findings": [FINDING]})),
+                 CFG, db_connect(":memory:"), 1)
+    ok &= check("a run where everything searched is complete",
+                clean["complete"] is True and not clean["failures"])
+    con.close()
 
     print("\nexpansion has no web search, so an empty result is never legitimate")
     state = RunState()

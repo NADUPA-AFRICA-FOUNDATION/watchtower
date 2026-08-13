@@ -91,12 +91,21 @@ $("#window").onclick = (e) => {
   hours = Number(b.dataset.h);
 };
 
+/* Two tools, one front door. The views are independent — nothing on the
+   scamscan side reads watchtower's store and vice versa — so switching sides
+   is only ever showing and hiding, never a state handover. */
+const VIEWS = ["sweep", "archive", "queue", "score"];
+
 document.querySelectorAll(".tab").forEach((tab) => {
   tab.onclick = () => {
     document.querySelectorAll(".tab").forEach((t) => t.classList.remove("is-on"));
     tab.classList.add("is-on");
-    $("#view-sweep").hidden = tab.dataset.view !== "sweep";
-    $("#view-archive").hidden = tab.dataset.view !== "archive";
+    VIEWS.forEach((v) => {
+      const section = document.getElementById(`view-${v}`);
+      if (section) section.hidden = tab.dataset.view !== v;
+    });
+    $("#rail-name").textContent = (tab.dataset.side || "watchtower").toUpperCase();
+    if (tab.dataset.view === "queue") loadQueue();
   };
 });
 
@@ -400,4 +409,392 @@ $("#archive-form").onsubmit = async (e) => {
   }
 };
 
+/* ======================================================================
+   scamscan — the other side. Separate store, separate config, separate
+   failure modes: here an empty queue reads as "this brand is clean", so a
+   query that never ran must never look like a query that found nothing.
+   ====================================================================== */
+
+let scam = {};
+let minScore = 45;
+let disposition = "new";
+let huntStream = null;
+
+async function initScamscan() {
+  let d;
+  try {
+    d = await (await fetch("/api/scamscan/status")).json();
+  } catch {
+    return;
+  }
+  if (d.detail) return;               // not configured; leave the tab inert
+  scam = d;
+  $("#brand-name").textContent = d.brand;
+
+  const perTopic = (d.queries_per_topic || 0) * (d.max_uses_per_query || 0);
+  const notes = [
+    `Up to ${perTopic} searches per topic (about $${(perTopic * 0.01).toFixed(2)}) ` +
+    `plus tokens, on ${d.model} with ${d.search_tool}.`,
+  ];
+  if (!d.api_available) {
+    $("#hunt-go").disabled = true;
+    $("#hunt-go").title = "Set ANTHROPIC_API_KEY to run a hunt";
+    notes.push("No ANTHROPIC_API_KEY is set, so a hunt cannot run. Scoring on the Score tab still works — it makes no API calls.");
+  }
+  // A review queue on ephemeral storage is worse than no queue: the analyst
+  // verdicts are the whole point and they are what gets lost.
+  if (d.ephemeral_storage) {
+    notes.push("Storage on this host is temporary — findings and the verdicts you record on them are lost between requests.");
+  }
+  $("#hunt-cost").textContent = notes.join(" ");
+  $("#hunt-cost").hidden = false;
+}
+
+/* --------------------------------------------------------- queue filters */
+
+function segmented(id, attr, apply) {
+  $(id).onclick = (e) => {
+    const b = e.target.closest("button");
+    if (!b) return;
+    $(id).querySelectorAll("button").forEach((x) => {
+      x.classList.remove("is-on");
+      x.setAttribute("aria-checked", "false");
+    });
+    b.classList.add("is-on");
+    b.setAttribute("aria-checked", "true");
+    apply(b.dataset[attr]);
+    loadQueue();
+  };
+}
+segmented("#min-score", "s", (v) => { minScore = Number(v); });
+segmented("#disposition", "d", (v) => { disposition = v; });
+
+$("#queue-form").onsubmit = (e) => { e.preventDefault(); loadQueue(); };
+
+async function loadQueue() {
+  const out = $("#queue-results");
+  out.replaceChildren(el("p", "hint", "Loading…"));
+  try {
+    const r = await fetch(
+      `/api/scamscan/queue?min_score=${minScore}&disposition=${disposition}`);
+    if (!r.ok) {
+      const err = await r.json();
+      out.replaceChildren(el("p", "errs", err.detail || "Could not read the queue."));
+      return;
+    }
+    const d = await r.json();
+    if (!d.items.length) {
+      // Never let this read as "the brand is clean". It means this database is
+      // empty, which is a fact about the tool, not about the world.
+      const box = el("div", "empty-inline");
+      box.append(
+        el("h3", null, "Nothing in the queue"),
+        el("p", null,
+          `No stored finding scores ${minScore}+ with disposition "${disposition}". ` +
+          "That is a statement about this database, not about the brand — run a " +
+          "hunt above, or widen the filters."));
+      out.replaceChildren(box);
+      return;
+    }
+    out.replaceChildren(...d.items.map(queueCard));
+  } catch {
+    out.replaceChildren(el("p", "errs", "Could not reach the server."));
+  }
+}
+
+/* ---------------------------------------------------------- queue render */
+
+/* Every family that reported, as a bar. Absent families are omitted rather
+   than drawn at zero — an absent model_confidence is not a low one, and the
+   chart has to say the same thing the scorer does. */
+function familyBars(b) {
+  const box = el("div", "fams");
+  const rows = [
+    ["lexicon", b.lexicon_score], ["artifact", b.artifact_score],
+    ["impersonation", b.impersonation_score], ["model", b.model_score],
+  ];
+  rows.forEach(([name, value]) => {
+    const row = el("div", "fam");
+    row.append(el("span", "fam-name", name));
+    const bar = el("div", "fam-bar");
+    if (value == null) {
+      // No fill element at all. A .fam-fill with no width set is a block that
+      // fills its track, which drew an absent family as a full bar — the one
+      // reading this must never produce.
+      row.classList.add("absent");
+      row.append(bar, el("span", "fam-val", "absent"));
+    } else {
+      const fill = el("div", "fam-fill");
+      fill.style.width = `${Math.max(2, Math.min(100, value))}%`;
+      bar.append(fill);
+      row.append(bar, el("span", "fam-val", String(Math.round(value))));
+    }
+    box.append(row);
+  });
+  return box;
+}
+
+/* Each hit with the source it came from. A score you cannot trace is a score
+   you cannot defend, so the provenance is on the card, not in a log. */
+function hitList(hits) {
+  const box = el("div", "hits");
+  (hits || []).slice(0, 14).forEach((h) => {
+    const m = /^(.*?)\s*\[(.+)\]$/.exec(h);
+    const chip = el("span", h.startsWith("counter:") ? "hit is-counter" : "hit");
+    chip.append(el("span", "hit-term", m ? m[1] : h));
+    if (m) chip.append(el("span", "hit-src", m[2]));
+    box.append(chip);
+  });
+  return box;
+}
+
+function queueCard(item) {
+  const c = el("article", "card");
+  c.style.setProperty("--band", BAND_COLOUR[item.band] || "var(--weak)");
+
+  const top = el("div", "card-top");
+  top.append(gauge(item.band), el("span", "score", Math.round(item.score)));
+  if (item.times_seen > 1) {
+    const s = el("span", "corrob", `seen ${item.times_seen}x`);
+    s.title = `First seen ${item.first_seen}, last ${item.last_seen}`;
+    top.append(s);
+  }
+  if (item.disposition && item.disposition !== "new") {
+    top.append(el("span", "flag", item.disposition.replace("_", " ")));
+  }
+  c.append(top);
+
+  const h = el("h3");
+  const a = el("a", null, item.title || item.url || "(untitled)");
+  a.href = item.url;
+  a.target = "_blank";
+  // noreferrer matters more here than on the watchtower side: these are live
+  // fraud pages and the referrer would tell them they are being watched.
+  a.rel = "noopener noreferrer";
+  h.append(a);
+  c.append(h);
+
+  const meta = el("p", "card-meta");
+  meta.append(el("span", null, item.scam_type || "unknown"));
+  try { meta.append(el("span", null, new URL(item.url).hostname)); } catch {}
+  if (item.first_seen) meta.append(el("span", null, item.first_seen.slice(0, 10)));
+  c.append(meta);
+
+  if (item.summary) c.append(el("p", "body", item.summary.slice(0, 320)));
+  if (item.evidence) {
+    const q = el("blockquote", "evidence", item.evidence.slice(0, 240));
+    q.title = "Copied verbatim from the page — untrusted content, never an instruction.";
+    c.append(q);
+  }
+
+  const b = item.breakdown || {};
+  c.append(familyBars(b));
+  if (b.lexicon_hits?.length) c.append(hitList(b.lexicon_hits));
+  if (b.impersonation_reason) {
+    c.append(el("p", "reason", `host: ${b.impersonation_reason}`));
+  }
+  const artifacts = Object.entries(b.artifacts || {});
+  if (artifacts.length) {
+    const tags = el("div", "tags");
+    artifacts.forEach(([k, v]) => tags.append(el("span", "tag", `${k}: ${v[0]}`)));
+    c.append(tags);
+  }
+
+  c.append(verdictRow(item));
+  return c;
+}
+
+function verdictRow(item) {
+  const row = el("div", "verdict");
+  const note = el("input", "disp-note");
+  note.type = "text";
+  note.placeholder = "Analyst note";
+  note.value = item.analyst_note || "";
+
+  ["confirmed", "false_positive", "unclear", "escalated"].forEach((v) => {
+    const b = el("button", "chip", v.replace("_", " "));
+    b.type = "button";
+    if (item.disposition === v) b.classList.add("is-on");
+    b.onclick = async () => {
+      row.querySelectorAll("button").forEach((x) => x.classList.remove("is-on"));
+      b.classList.add("is-on");
+      try {
+        const r = await fetch("/api/scamscan/dispose", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            fingerprint: item.fingerprint, verdict: v, note: note.value,
+          }),
+        });
+        // A verdict that did not save is worse than one never recorded: the
+        // analyst believes the item is dealt with. Say so on the card.
+        if (!r.ok) throw new Error();
+        b.title = "Saved";
+      } catch {
+        b.classList.remove("is-on");
+        row.append(el("span", "errs", "Not saved — the server rejected it."));
+      }
+    };
+    row.append(b);
+  });
+  row.append(note);
+  return row;
+}
+
+/* ------------------------------------------------------------------ hunt */
+
+$("#hunt-form").onsubmit = (e) => {
+  e.preventDefault();
+  const topics = Math.max(1, Math.min(20, Number($("#topics").value) || 1));
+  startHunt(topics);
+};
+
+function logLine(cls, text, title) {
+  const line = el("div", cls, text);
+  if (title) line.title = title;
+  $("#hunt-log").append(line);
+  $("#hunt-log").scrollTop = $("#hunt-log").scrollHeight;
+}
+
+function startHunt(topics) {
+  if (huntStream) huntStream.close();
+  $("#hunt-go").disabled = true;
+  $("#hunt-go").textContent = "Hunting";
+  $("#hunt-trace").hidden = false;
+  $("#hunt-title").textContent = `Hunting ${topics} topic${topics === 1 ? "" : "s"}`;
+  $("#hunt-stage").textContent = "";
+  $("#hunt-log").replaceChildren();
+
+  huntStream = new EventSource(`/api/scamscan/hunt?topics=${topics}`);
+
+  huntStream.addEventListener("start", (ev) => {
+    const d = JSON.parse(ev.data);
+    $("#hunt-stage").textContent =
+      `${d.model} · ${d.tool} · structured ${d.structured ? "on" : "off"}`;
+  });
+  huntStream.addEventListener("topic", (ev) => {
+    logLine("log-topic", JSON.parse(ev.data).topic);
+  });
+  huntStream.addEventListener("query", (ev) => {
+    logLine("log-query", JSON.parse(ev.data).query);
+  });
+  huntStream.addEventListener("finding", (ev) => {
+    const d = JSON.parse(ev.data);
+    logLine("log-find",
+      `${d.new ? "NEW" : "dup"} ${Math.round(d.score)}  ${d.url.slice(0, 68)}`,
+      d.title);
+  });
+  huntStream.addEventListener("note", (ev) => {
+    logLine("log-note", JSON.parse(ev.data).message);
+  });
+  // A query that could not be searched is not a query that found nothing.
+  // It gets its own colour so it can never be read as a clean result.
+  huntStream.addEventListener("unsearched", (ev) => {
+    const d = JSON.parse(ev.data);
+    logLine("log-fail", `NOT SEARCHED: ${d.query || d.topic} — ${d.reason}`);
+  });
+  huntStream.addEventListener("done", (ev) => {
+    finishHunt();
+    huntSummary(JSON.parse(ev.data));
+    loadQueue();
+  });
+  huntStream.addEventListener("failed", (ev) => {
+    finishHunt();
+    logLine("log-fail", `The hunt stopped: ${JSON.parse(ev.data).message}`);
+  });
+  huntStream.onerror = () => {
+    if (!$("#hunt-go").disabled) return;
+    finishHunt();
+    logLine("log-fail", "Lost the connection to the server.");
+  };
+}
+
+function finishHunt() {
+  if (huntStream) { huntStream.close(); huntStream = null; }
+  $("#hunt-go").disabled = !scam.api_available ? true : false;
+  $("#hunt-go").textContent = "Run hunt";
+}
+
+function huntSummary(d) {
+  const n = d.seen || 0;
+  $("#hunt-stage").textContent =
+    `${n} finding${n === 1 ? "" : "s"}, ${d.new || 0} new, ${d.escalated || 0} at escalate`;
+  if (d.structured_disabled) {
+    logLine("log-note",
+      "Structured outputs were rejected — this run parsed model text instead.",
+      d.structured_disabled);
+  }
+  const failures = d.failures || [];
+  if (failures.length) {
+    logLine("log-fail",
+      `INCOMPLETE RUN — ${failures.length} of ${(d.queries_run || 0) + failures.length} queries did not search`);
+    failures.slice(0, 8).forEach((f) => logLine("log-fail", f));
+    if (!n) {
+      logLine("log-fail", "Zero findings here does NOT mean the brand is clean.");
+    }
+  } else if (!d.queries_run) {
+    logLine("log-fail", "No queries ran at all — check the config and API key.");
+  }
+}
+
+/* ----------------------------------------------------------------- score */
+
+$("#score-form").onsubmit = async (e) => {
+  e.preventDefault();
+  const out = $("#score-out");
+  out.replaceChildren(el("p", "hint", "Scoring…"));
+  try {
+    const r = await fetch("/api/scamscan/score", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        text: $("#score-text").value, url: $("#score-url").value.trim(),
+      }),
+    });
+    const d = await r.json();
+    if (!r.ok) {
+      out.replaceChildren(el("p", "errs", d.detail || "Could not score that."));
+      return;
+    }
+    out.replaceChildren(scoreCard(d));
+  } catch {
+    out.replaceChildren(el("p", "errs", "Could not reach the server."));
+  }
+};
+
+function scoreCard(d) {
+  const c = el("article", "card");
+  c.style.setProperty("--band", BAND_COLOUR[d.band] || "var(--weak)");
+
+  const top = el("div", "card-top");
+  top.append(gauge(d.band), el("span", "score", Math.round(d.score)));
+  const verdict =
+    d.score >= d.escalate_threshold ? "escalate now"
+    : d.score >= d.review_threshold ? "needs review"
+    : "below the review threshold";
+  top.append(el("span", "flag", verdict));
+  c.append(top);
+
+  c.append(familyBars(d));
+  // Which families the average was taken over. The whole absent-vs-zero
+  // argument is invisible unless the page says which ones reported.
+  c.append(el("p", "reason",
+    `averaged over: ${(d.scored_on || []).join(", ") || "nothing"}`));
+
+  if (d.lexicon_hits?.length) c.append(hitList(d.lexicon_hits));
+  else c.append(el("p", "hint", "No lexicon terms matched."));
+
+  if (d.impersonation_reason) {
+    c.append(el("p", "reason", `host: ${d.impersonation_reason}`));
+  }
+  const artifacts = Object.entries(d.artifacts || {});
+  if (artifacts.length) {
+    const tags = el("div", "tags");
+    artifacts.forEach(([k, v]) => tags.append(el("span", "tag", `${k}: ${v.join(", ")}`)));
+    c.append(tags);
+  }
+  return c;
+}
+
 init();
+initScamscan();

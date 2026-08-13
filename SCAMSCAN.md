@@ -5,6 +5,11 @@
 
 Keyword-driven scam discovery using Claude's server-side web search.
 
+Runs from the CLI, or from the **scamscan side of the web UI** — `python run.py
+serve` opens a page with watchtower's Sweep and Archive tabs on one side and
+scamscan's Queue and Score tabs on the other. Same engine behind both; the web
+layer calls `hunt()`, `score_finding()` and the store directly.
+
 Claude proposes candidates; local Python code scores them. Anything that drives
 analyst workload is computed in auditable code, not inside a prompt.
 
@@ -27,6 +32,16 @@ python scamscan.py hunt --config config.json --topics 1   # start with one topic
 | `test "<text>" --url <url>` | Score sample text offline, no API calls |
 | `selftest` | Lint the schemas, show which search tool the model gets, audit lexicon provenance |
 | `selftest --live` | Prove structured outputs composes with server-side search (~1 search) |
+
+In the browser, the **Queue** tab runs a hunt (stating the cost first), lists
+the review queue with the full score breakdown, and records analyst verdicts.
+The **Score** tab is `test` in a page — free, no API call, and it shows every
+lexicon hit with the source it came from.
+
+Two things the UI is careful about, for the same reason the CLI is: an empty
+queue says plainly that it is a fact about the database and not about the
+brand, and a query that could not be searched arrives on its own SSE event
+(`unsearched`) and renders in the failure colour, never as a zero.
 
 Use `test` heavily before your first real run. It costs nothing and it is how you
 tune weights against examples you already know the answer to. Run `selftest`

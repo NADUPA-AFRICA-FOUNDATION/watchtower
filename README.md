@@ -1,8 +1,10 @@
 # watchtower
 
-> This repo holds two tools. **watchtower** (this file) sweeps many sources
-> for a keyword. **scamscan** ([SCAMSCAN.md](SCAMSCAN.md)) hunts live scam
-> pages with Claude's server-side web search. They share nothing but the repo.
+> This repo holds two tools behind one page. **watchtower** (this file) sweeps
+> many sources for a keyword — the **Sweep** and **Archive** tabs. **scamscan**
+> ([SCAMSCAN.md](SCAMSCAN.md)) hunts live scam pages with Claude's server-side
+> web search — the **Queue** and **Score** tabs. They share the UI and nothing
+> below it: separate configs, separate databases, neither imports the other.
 
 Type a keyword, get ranked findings across news, regulatory sources, social and
 sanctions lists. Also runs as a scheduled monitor once you know what to watch.
