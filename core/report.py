@@ -80,7 +80,8 @@ def terminal(result: SweepResult, top: int = 20) -> str:
         f'  "{result.query}"',
         f"  {len(result.items)} result(s)"
         + (f", {len(result.strong)} strong" if result.enriched else "")
-        + ("" if result.enriched else "  [keyword ranking only — no API key]"),
+        + ("" if result.enriched else
+           f"  [keyword ranking only — {getattr(result, 'scoring_error', '') or 'no API key'}]"),
         "  " + "-" * 66,
     ]
 

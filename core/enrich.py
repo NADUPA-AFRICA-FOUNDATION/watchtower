@@ -81,6 +81,23 @@ actually present rather than guessing at the rest. A page that merely mentions \
 the search terms in a navigation menu or unrelated aside is not a match."""
 
 
+def _fatal_reason(exc) -> str | None:
+    """Account-level failures that every later call in this run will hit too.
+
+    A depleted balance or a rejected key is not per-item bad luck: retrying it
+    across 25 candidates burns 25 round trips to produce 25 identical errors,
+    and leaves the run looking like it was scored when it wasn't. Rate limits
+    and timeouts are deliberately NOT fatal — those are worth continuing past.
+    """
+    status = getattr(exc, "status_code", None)
+    msg = str(exc).lower()
+    if status in (401, 403):
+        return "Anthropic API key was rejected"
+    if status == 400 and "credit balance" in msg:
+        return "Anthropic credit balance is too low"
+    return None
+
+
 class Enricher:
     def __init__(self, watchlist: list[str], categories: list[str],
                  escalate_above: int = 60, api_key: str | None = None):
@@ -91,6 +108,9 @@ class Enricher:
         self.enabled = bool(key) and anthropic is not None
         self.client = anthropic.Anthropic(api_key=key) if self.enabled else None
         self.instructions = _instructions(watchlist, categories)
+        # Set once an account-level failure is seen, which also flips `enabled`
+        # off so the rest of the run falls back to keyword ranking immediately.
+        self.fatal_error: str | None = None
 
     def _call(self, model: str, title: str, text: str, focus: str = "") -> dict | None:
         # focus goes in the user turn, not the system block, so the cached
@@ -141,6 +161,14 @@ class Enricher:
                 out["model"] = TRIAGE_MODEL
             return out
         except Exception as e:
+            fatal = _fatal_reason(e)
+            if fatal:
+                # Stop trying for the rest of this run rather than repeating a
+                # doomed call once per candidate.
+                self.enabled = False
+                self.fatal_error = fatal
+                return {"summary": "", "entities": [], "categories": [],
+                        "relevance": 0, "skipped": fatal, "fatal": True}
             return {"summary": "", "entities": [], "categories": [],
                     "relevance": 0, "skipped": f"{type(e).__name__}: {e}"}
 

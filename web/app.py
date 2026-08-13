@@ -229,6 +229,7 @@ def run_sweep(
             "failed": result.failed,
             "skipped": result.skipped,
             "complete": result.complete,
+            "scoring_error": result.scoring_error,
             "items": [
                 {**asdict(i), "band": report.band(i.relevance),
                  "text": i.text[:600]}

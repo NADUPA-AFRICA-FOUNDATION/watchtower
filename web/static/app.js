@@ -294,7 +294,8 @@ function render(d) {
     s.innerHTML = `<strong>${strong}</strong> scored 60+`;
     sum.append(s);
   } else {
-    sum.append(el("span", null, "keyword ranking — no API key"));
+    sum.append(el("span", null,
+      `keyword ranking — ${d.scoring_error || "no API key"}`));
   }
   if (d.report) {
     const link = el("a", null, "Download report");

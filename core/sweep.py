@@ -45,6 +45,8 @@ class SweepResult:
     # hits; only these say whether the number can be trusted.
     failed: dict[str, str] = field(default_factory=dict)
     skipped: dict[str, str] = field(default_factory=dict)
+    # Why scoring fell back to keywords, when it wasn't simply a missing key.
+    scoring_error: str = ""
 
     @property
     def strong(self) -> list[Item]:
@@ -240,8 +242,18 @@ def sweep(query: str, fetcher: Fetcher, hours: int = 72,
     if enricher and enricher.enabled:
         candidates = [i for i in deduped if not i.enriched][:max_enrich]
         progress({"type": "stage", "stage": "score", "count": len(candidates)})
+        scored_any = False
         for item in candidates:
+            if time_left() <= 2.0:
+                result.scoring_error = "ran out of time before scoring finished"
+                break
             out = enricher.enrich(item.title, truncate(item.text), focus=query)
+            if out.get("fatal"):
+                # Account-level failure: every remaining call would fail the
+                # same way. Record it once and fall back to keyword ranking.
+                result.scoring_error = out["skipped"]
+                result.errors.append(f"Claude scoring stopped: {out['skipped']}")
+                break
             if out.get("skipped"):
                 result.errors.append(out["skipped"])
                 continue
@@ -250,9 +262,14 @@ def sweep(query: str, fetcher: Fetcher, hours: int = 72,
             item.categories = out.get("categories", []) or []
             item.relevance = int(out.get("relevance", item.relevance))
             item.enriched = True
+            scored_any = True
             progress({"type": "scored", "title": item.title[:80],
                       "relevance": item.relevance})
-        result.enriched = True
+        # Only claim the run was model-scored if something actually was. This
+        # used to be an unconditional True, so a run where every call failed
+        # still rendered as "N scored 60+" — a keyword ranking wearing the
+        # model's credibility, which is the worst way for this to fail.
+        result.enriched = scored_any
 
     # --- 5. rank and roll up -------------------------------------------
     deduped.sort(key=lambda i: (-i.relevance, i.published_at), reverse=False)

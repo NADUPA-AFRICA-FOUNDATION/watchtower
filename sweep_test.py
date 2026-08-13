@@ -297,6 +297,57 @@ def main():
     finally:
         SW.BACKENDS = slow_backends
 
+    print("\nscoring failure must not masquerade as a scored run")
+    # Reproduces a real incident: a depleted Anthropic balance returns 400 on
+    # every call. The old code retried it once per candidate and then set
+    # enriched=True regardless, so a keyword ranking was presented as though
+    # Claude had scored it.
+    class Billing400(Exception):
+        status_code = 400
+
+        def __str__(self):
+            return ("Error code: 400 - your credit balance is too low to "
+                    "access the Anthropic API")
+
+    class BrokeEnricher:
+        def __init__(self):
+            self.enabled = True
+            self.escalate_above = 60
+            self.calls = 0
+            self.fatal_error = None
+
+        def enrich(self, title, text, focus=""):
+            self.calls += 1
+            from core.enrich import _fatal_reason
+            e = Billing400()
+            reason = _fatal_reason(e)
+            self.enabled = False
+            self.fatal_error = reason
+            return {"summary": "", "entities": [], "categories": [],
+                    "relevance": 0, "skipped": reason, "fatal": True}
+
+    broke_ai = BrokeEnricher()
+    billed = sweep(QUERY, fetcher, hours=72, limit=20, fetch_bodies=False,
+                   enricher=broke_ai, max_enrich=25)
+    ok &= check("a doomed API call is not retried for every candidate",
+                broke_ai.calls == 1)
+    ok &= check("the run is not labelled as model-scored",
+                billed.enriched is False)
+    ok &= check("the real reason is recorded once",
+                "credit balance" in billed.scoring_error.lower())
+    ok &= check("and reported exactly once, not per item",
+                sum("credit balance" in e.lower() for e in billed.errors) == 1)
+    ok &= check("results still come back, ranked by keyword",
+                len(billed.items) > 0)
+    ok &= check("the terminal report names the real reason, not 'no API key'",
+                "credit balance" in report.terminal(billed).lower())
+
+    from core.enrich import _fatal_reason as _fr
+    ok &= check("a rejected key is fatal too",
+                _fr(type("E", (Exception,), {"status_code": 401})()) is not None)
+    ok &= check("a rate limit is NOT fatal — worth continuing past",
+                _fr(type("E", (Exception,), {"status_code": 429})()) is None)
+
     print("\nfailure handling")
     bad = sweep("nothing matches here", fetcher, hours=24,
                 backends=["gdelt", "nonexistent_backend"], fetch_bodies=False)
