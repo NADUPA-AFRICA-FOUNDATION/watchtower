@@ -18,6 +18,14 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 
+# scamscan.py loads .env at import, so without this the suite would take the
+# Gemini path on a machine with a Gemini key and the Anthropic path on one
+# without — passing or failing depending on whose laptop it runs on. The
+# provider-specific behaviour is covered by its own section below, which sets
+# the variables it needs and restores them.
+os.environ["SCAMSCAN_PROVIDER"] = "anthropic"
+os.environ.setdefault("ANTHROPIC_API_KEY", "test-key-not-used-offline")
+
 from scamscan import (DYNAMIC_FILTERING_MODELS, FINDINGS_SCHEMA,
                       QUERIES_SCHEMA, WEB_SEARCH_BASIC, WEB_SEARCH_DYNAMIC,
                       HuntError, RunState, db_connect, expand_queries,
@@ -439,6 +447,10 @@ def main():
     # Expansion runs without the search tool, so ungrounded is correct there.
     ok &= check("a toolless call is not expected to be grounded",
                 grounding_failures(GResp([GCand()]), expected_search=False) == [])
+
+    print("\nthe suite pins a provider so it does not depend on local keys")
+    ok &= check("pinned to anthropic for the deterministic sections",
+                provider({}) == "anthropic")
 
     print("\nprovider selection follows the key that is actually set")
     saved = {k: os.environ.get(k) for k in ("GEMINI_API_KEY", "ANTHROPIC_API_KEY",

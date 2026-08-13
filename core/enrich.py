@@ -12,6 +12,7 @@ Cost discipline baked in:
 from __future__ import annotations
 
 import json
+import logging
 import os
 import random
 import time
@@ -27,14 +28,34 @@ try:
 except ImportError:
     genai = genai_types = None
 
+class _DropThoughtPartWarning(logging.Filter):
+    """Silence one specific, per-item SDK warning.
+
+    Gemini 3 models return a `thought_signature` part beside the answer, and the
+    SDK warns about "non-text parts" every time .text or .parsed is read. A
+    sweep enriches up to --max-ai items, so this is 25 identical lines of noise
+    per run about something the code deliberately ignores. Narrow on purpose:
+    every other warning from the SDK still comes through.
+    """
+
+    def filter(self, record):
+        return "non-text parts in the response" not in record.getMessage()
+
+
+if genai is not None:
+    logging.getLogger("google_genai.types").addFilter(_DropThoughtPartWarning())
+
 TRIAGE_MODEL = "claude-haiku-4-5-20251001"
 DEEP_MODEL = "claude-sonnet-5"
 
 # Gemini equivalents of the same two tiers. Overridable, because model IDs move
 # faster than this file does and a free-tier key does not see all of them —
 # `python run.py models` lists what your key can actually reach.
-GEMINI_TRIAGE_MODEL = os.environ.get("GEMINI_TRIAGE_MODEL", "gemini-2.5-flash")
-GEMINI_DEEP_MODEL = os.environ.get("GEMINI_DEEP_MODEL", "gemini-2.5-pro")
+# Verified against a live free-tier key on 2026-08-13. The 2.5 models that used
+# to be the obvious defaults now 404 with "no longer available to new users",
+# and the Pro models 429 — Pro is not on the free tier. Both of these are flash.
+GEMINI_TRIAGE_MODEL = os.environ.get("GEMINI_TRIAGE_MODEL", "gemini-3.5-flash-lite")
+GEMINI_DEEP_MODEL = os.environ.get("GEMINI_DEEP_MODEL", "gemini-3.7-flash")
 
 # Free-tier Gemini keys are rate limited per minute, and a sweep enriches up to
 # --max-ai items back to back. Without a retry the tail of every sweep would
@@ -208,7 +229,14 @@ class Enricher:
                         max_output_tokens=1024,
                     ),
                 )
-                return json.loads(resp.text)
+                # Gemini 3 returns a thought_signature part beside the answer
+                # and resp.text warns about dropping it on every single item.
+                text = "".join(
+                    part.text
+                    for cand in (resp.candidates or [])
+                    for part in (getattr(cand.content, "parts", None) or [])
+                    if getattr(part, "text", None))
+                return json.loads(text)
             except Exception as e:
                 last = e
                 if not _is_rate_limit(e) or _fatal_reason(e):

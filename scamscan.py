@@ -20,6 +20,7 @@ import csv
 import difflib
 import hashlib
 import json
+import logging
 import os
 import re
 import sqlite3
@@ -38,7 +39,51 @@ try:
 except ImportError:
     genai = genai_types = None
 
+class _DropThoughtPartWarning(logging.Filter):
+    """Silence one specific, per-item SDK warning.
+
+    Gemini 3 models return a `thought_signature` part beside the answer, and the
+    SDK warns about "non-text parts" every time .text or .parsed is read. A
+    sweep enriches up to --max-ai items, so this is 25 identical lines of noise
+    per run about something the code deliberately ignores. Narrow on purpose:
+    every other warning from the SDK still comes through.
+    """
+
+    def filter(self, record):
+        return "non-text parts in the response" not in record.getMessage()
+
+
+if genai is not None:
+    logging.getLogger("google_genai.types").addFilter(_DropThoughtPartWarning())
+
 DB_PATH = "scamscan.db"
+
+
+def load_env(path=None):
+    """Read .env into os.environ, the same way run.py does for watchtower.
+
+    Duplicated rather than imported: scamscan shares no code with the other
+    tool, and `python scamscan.py hunt` finding no key while `python run.py
+    serve` finds one is exactly the kind of works-here-not-there failure this
+    repo keeps trying to design out. Real environment variables win.
+    """
+    path = path or os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+    try:
+        with open(path, encoding="utf-8") as fh:
+            lines = fh.readlines()
+    except OSError:
+        return
+    for line in lines:
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key, value = key.strip(), value.strip().strip("\"'")
+        if key and value and key not in os.environ:
+            os.environ[key] = value
+
+
+load_env()
 
 # --------------------------------------------------------------------------
 # Artifact extraction
@@ -568,7 +613,7 @@ def structured_rejected(exc):
                 "response_schema", "response_json_schema", "response_mime_type"))
 
 
-GEMINI_MODEL = os.environ.get("SCAMSCAN_GEMINI_MODEL", "gemini-2.5-flash")
+GEMINI_MODEL = os.environ.get("SCAMSCAN_GEMINI_MODEL", "gemini-3.5-flash")
 
 # Terminal reasons that mean the model refused rather than reported nothing.
 GEMINI_REFUSALS = {"SAFETY", "PROHIBITED_CONTENT", "BLOCKLIST", "RECITATION", "SPII"}
@@ -613,20 +658,58 @@ def grounding_failures(resp, expected_search=True) -> list:
     return failures
 
 
+def gemini_text(resp):
+    """Concatenate the text parts, ignoring thinking parts.
+
+    Gemini 3 models return a `thought_signature` part alongside the answer, and
+    `resp.text` warns on every call about dropping it. The signature is not
+    output, so read the text parts directly rather than printing a warning per
+    query that means nothing to the person running the hunt.
+    """
+    out = []
+    for cand in getattr(resp, "candidates", None) or []:
+        for part in getattr(getattr(cand, "content", None), "parts", None) or []:
+            if getattr(part, "text", None):
+                out.append(part.text)
+    return "".join(out)
+
+
 def call_gemini(client, model, prompt, tools=None, max_tokens=4000, schema=None):
     config = {"max_output_tokens": max_tokens}
     if tools:
         config["tools"] = tools
     if schema:
-        # Gemini's equivalent of output_config.format. Unlike Anthropic's, the
-        # docs say this composes with google_search on Gemini 3 models — but
-        # _ask still detects a rejection rather than assuming either way.
+        # Gemini's equivalent of output_config.format. Verified live: this is
+        # accepted alongside google_search, so no downgrade is needed for the
+        # combination itself — _ask still watches for a rejection.
         config["response_mime_type"] = "application/json"
         config["response_json_schema"] = schema
-    resp = client.models.generate_content(
-        model=model, contents=prompt,
-        config=genai_types.GenerateContentConfig(**config))
-    return (resp.text or ""), resp
+    try:
+        resp = client.models.generate_content(
+            model=model, contents=prompt,
+            config=genai_types.GenerateContentConfig(**config))
+    except Exception as e:
+        if tools and _is_quota_error(e):
+            # Verified against a live free-tier key: grounding is billed
+            # separately from tokens and is simply not on the free tier for
+            # Gemini 3.x models. Ungrounded calls to the same model succeed
+            # seconds later, so a bare "rate limited" would send someone off
+            # to wait for a quota that is never coming back.
+            raise HuntError(
+                "Google Search grounding is not available on this key. Gemini "
+                "3.x grounding is a paid-tier feature (Gemini 2.5 had 500 free "
+                "requests/day but those models are no longer offered to new "
+                "keys). Ungrounded calls on this key still work, so watchtower "
+                "scoring is unaffected — but scamscan cannot search. Use "
+                "SCAMSCAN_PROVIDER=anthropic, or enable billing on the Gemini "
+                "key.") from e
+        raise
+    return gemini_text(resp), resp
+
+
+def _is_quota_error(exc):
+    status = getattr(exc, "status_code", None) or getattr(exc, "code", None)
+    return status == 429 or "resource_exhausted" in str(exc).lower()
 
 
 def call_claude(client, model, prompt, tools=None, max_tokens=4000, schema=None):

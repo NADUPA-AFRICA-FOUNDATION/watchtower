@@ -409,10 +409,25 @@ that work, and all three are visible to the user rather than silent:
   The executor is shut down with `wait=False`, otherwise `__exit__` blocks on
   the slowest backend and the budget is cosmetic.
 
-Environment variables: `ANTHROPIC_API_KEY`, `OPENSANCTIONS_API_KEY`,
-`WATCHTOWER_PASSWORD`, `WATCHTOWER_USER` (default `watchtower`),
-`WATCHTOWER_DATA_DIR`, `WATCHTOWER_SWEEP_BUDGET`. Locally these come from
-`.env`, which `run.py` loads and `.gitignore` excludes.
+Environment variables, in the host's settings and in `.env` locally (both
+`run.py` and `scamscan.py` load `.env`; real environment variables win):
+
+| Variable | Needed | What it does |
+|---|---|---|
+| `WATCHTOWER_PASSWORD` | **required off localhost** | Without it the app serves 503. HTTP Basic. |
+| `GEMINI_API_KEY` | one of these two | Scoring, summaries, scamscan. Free tier covers scoring but **not** search grounding. |
+| `ANTHROPIC_API_KEY` | one of these two | Same, plus scamscan's server-side search. |
+| `WATCHTOWER_USER` | optional | Basic-auth user, default `watchtower`. |
+| `OPENSANCTIONS_API_KEY` | optional | Otherwise that lane renders "off". |
+| `WATCHTOWER_DATA_DIR` | optional | A mounted volume. Without it `/tmp`, and the archive **and the scamscan review queue** are ephemeral. |
+| `WATCHTOWER_SWEEP_BUDGET` | optional | Wall-clock ceiling, default 270s. |
+| `WATCHTOWER_LLM_PROVIDER`, `SCAMSCAN_PROVIDER` | optional | Force `gemini` or `anthropic`. |
+| `GEMINI_TRIAGE_MODEL`, `GEMINI_DEEP_MODEL`, `SCAMSCAN_GEMINI_MODEL` | optional | Model overrides. |
+
+On Vercel the review queue is the thing that suffers most from ephemeral
+storage: a lost sweep can be re-run, a lost analyst verdict cannot. Set
+`WATCHTOWER_DATA_DIR` to a mounted volume before using the Queue tab in
+anger.
 
 Scheduled mode cannot run on Vercel at all — it needs `adapters/`, which is
 missing, and a persistent database.

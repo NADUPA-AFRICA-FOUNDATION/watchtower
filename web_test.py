@@ -23,6 +23,11 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from fastapi.testclient import TestClient
 
+# Same reason as scamscan_test: the app now imports scamscan, which loads .env,
+# so pin the provider or the assertions below depend on whose keys are present.
+os.environ["SCAMSCAN_PROVIDER"] = "anthropic"
+os.environ.setdefault("ANTHROPIC_API_KEY", "test-key-not-used-offline")
+
 import web.app as webapp
 from core.fetch import Fetcher
 from sweep_test import handler
@@ -232,8 +237,10 @@ def main():
                     st["lexicon_terms"] > 0 and st["counter_terms"] > 0)
         ok &= check("and which search tool the model actually gets",
                     "web_search_20" in st["search_tool"])
+        ok &= check("it names the provider it will call",
+                    st["provider"] == "anthropic")
         ok &= check("and whether a hunt can run at all",
-                    st["api_available"] == bool(os.environ.get("ANTHROPIC_API_KEY")))
+                    st["api_available"] is True)
 
         r = client.get("/api/scamscan/queue")
         ok &= check("an empty queue is an empty list, not an error",

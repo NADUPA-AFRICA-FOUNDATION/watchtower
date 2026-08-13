@@ -94,9 +94,10 @@ async def require_password(request, call_next):
     with no password is the documented design and adding a login to it would be
     friction for nothing.
 
-    On a public host it is the opposite: /api/sweep spends real money against
-    ANTHROPIC_API_KEY, so an unauthenticated public deployment is someone
-    else's budget to burn. With no password set we therefore fail *closed* and
+    On a public host it is the opposite: /api/sweep and /api/scamscan/hunt
+    spend real money against whichever model key is set, so an unauthenticated
+    public deployment is someone else's budget to burn — and the scamscan queue
+    it exposes holds personal data scraped off live pages. With no password set we therefore fail *closed* and
     serve 503 rather than quietly exposing it — a deployment that refuses to
     work is recoverable, one that silently runs up a bill is not.
     """
@@ -107,7 +108,8 @@ async def require_password(request, call_next):
         return JSONResponse(
             {"detail": "WATCHTOWER_PASSWORD is not set. Refusing to serve a "
                        "public instance without authentication — /api/sweep "
-                       "spends real API credits. Set it in the host's "
+                       "and /api/scamscan/hunt spend real API credits and the "
+                       "review queue holds personal data. Set it in the host's "
                        "environment variables and redeploy."},
             status_code=503)
 

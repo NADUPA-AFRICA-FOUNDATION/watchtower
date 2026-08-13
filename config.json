@@ -213,7 +213,7 @@
   "search": {
     "_provider_note": "null = auto: gemini if GEMINI_API_KEY is set, else anthropic. Force with \"gemini\" or \"anthropic\".",
     "provider": null,
-    "gemini_model": "gemini-2.5-flash",
+    "gemini_model": "gemini-3.5-flash",
     "model": "claude-sonnet-4-6",
     "expansion_model": "claude-sonnet-4-6",
     "max_uses_per_query": 4,
