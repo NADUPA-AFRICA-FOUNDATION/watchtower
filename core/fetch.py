@@ -20,6 +20,12 @@ from urllib.parse import urlparse
 import httpx
 
 
+# Minimum pause after a 429 that carries no Retry-After. Five seconds is the
+# figure GDELT states in its own rate-limit body, and it is a reasonable floor
+# for any host that bothered to say "slow down".
+RATE_LIMIT_FLOOR = 5.0
+
+
 @dataclass
 class FetchResult:
     url: str
@@ -151,9 +157,19 @@ class Fetcher:
             # 429/5xx are worth retrying; 403/404 are not.
             if r.status_code in (429, 500, 502, 503, 504) and attempt < retries:
                 retry_after = r.headers.get("Retry-After")
-                time.sleep(float(retry_after) if retry_after and retry_after.isdigit()
-                           else backoff)
-                backoff *= 2
+                if retry_after and retry_after.isdigit():
+                    wait = float(retry_after)
+                elif r.status_code == 429:
+                    # 429 means "you are going too fast", and one second is not
+                    # a serious answer to that. GDELT asks in its own 429 body
+                    # for one request per five seconds and sends no Retry-After,
+                    # so retrying at 1s then 2s burned every attempt and
+                    # reported a dead source that was merely being throttled.
+                    wait = max(backoff, RATE_LIMIT_FLOOR)
+                else:
+                    wait = backoff
+                time.sleep(wait)
+                backoff = max(backoff * 2, wait * 2)
                 continue
 
             if r.status_code != 200:

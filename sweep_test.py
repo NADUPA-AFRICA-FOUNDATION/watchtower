@@ -287,6 +287,42 @@ def main():
                 all(g >= 0.04 for g in gaps))
     rl.close()
 
+    print("\nbacking off properly on 429")
+    # GDELT states "one request every 5 seconds" in its 429 body and sends no
+    # Retry-After. Retrying at 1s then 2s burned every attempt and reported a
+    # throttled source as a dead one.
+    from core.fetch import RATE_LIMIT_FLOOR
+    waits = []
+    real_sleep = time.sleep
+
+    def capture(seconds):
+        waits.append(seconds)          # record, don't actually wait
+
+    attempts = {"n": 0}
+
+    def throttler(request: httpx.Request) -> httpx.Response:
+        if "robots.txt" in str(request.url):
+            return httpx.Response(200, text="User-agent: *\nAllow: /\n")
+        attempts["n"] += 1
+        if attempts["n"] < 3:
+            return httpx.Response(429, text="Please limit requests to one every 5 seconds")
+        return httpx.Response(200, json=GDELT_JSON)
+
+    tf = Fetcher("watchtower-test/0.1", delay=0.0,
+                 transport=httpx.MockTransport(throttler))
+    import core.fetch as _fetchmod
+    _fetchmod.time.sleep = capture
+    try:
+        got = tf.get("https://api.gdeltproject.org/api/v2/doc/doc?x=1", api=True)
+    finally:
+        _fetchmod.time.sleep = real_sleep
+    ok &= check("a throttled source is retried, not written off", got.ok)
+    ok &= check("the first 429 waits at least as long as the host asked",
+                waits and waits[0] >= RATE_LIMIT_FLOOR)
+    ok &= check("and backs off further on the second", len(waits) > 1
+                and waits[1] > waits[0])
+    tf.close()
+
     print("\nAPI calls are not treated as crawling")
     # robots.txt for the Wikipedia API disallows /w/ — the endpoint Wikipedia
     # publishes for this purpose. Crawling must still obey it.
