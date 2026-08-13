@@ -163,6 +163,39 @@ prefilter makes every sweep cost real money.
 Haiku triages and only items above `escalate_above` get a Sonnet pass, tool use
 forces valid JSON. Models: `claude-haiku-4-5-20251001` and `claude-sonnet-5`.
 
+**Two model providers, chosen by which key is set.** `available_provider()` in
+`enrich.py` and `provider()` in `scamscan.py` both prefer **Gemini** when
+`GEMINI_API_KEY` is present, because it has a free tier and a depleted Anthropic
+balance is the common case here; `WATCHTOWER_LLM_PROVIDER` / `SCAMSCAN_PROVIDER`
+(or `search.provider` in `config.json`) force one. Neither SDK is a hard import
+— both are wrapped in `try/except ImportError`, so the tools still run with
+either one absent.
+
+What differs per provider is not the call but the **failure shape**, and that is
+the part that must not be flattened:
+
+- Anthropic forces JSON with a tool / `output_config.format`; Gemini uses
+  `response_json_schema` + `response_mime_type`. Both end up with valid JSON, so
+  nothing regex-parses prose on either path.
+- **Anthropic reports a failed search as an error object inside a 200. Gemini
+  just answers anyway, from the model's own memory, and the only evidence is
+  negative — `grounding_metadata.web_search_queries` is empty.** An ungrounded
+  answer to "search for scam pages" is a query that never ran, and it is the
+  more dangerous of the two because the text comes back well formed.
+  `grounding_failures()` is scamscan's Gemini-side `search_failures()`;
+  `run_failures()` dispatches. Expansion passes `expected_search=False`, since
+  it declares no tool.
+- `stop_reason: refusal` ↔ `finish_reason` in `GEMINI_REFUSALS` or
+  `prompt_feedback.block_reason`. `pause_turn` ↔ `finish_reason: MAX_TOKENS`.
+- Free-tier Gemini is rate limited per minute and a sweep enriches up to
+  `--max-ai` items back to back, so `_call_gemini` retries 429s with jittered
+  backoff. Without it the tail of every sweep comes back unscored and reads as a
+  run of irrelevant articles. A *daily* quota exhaustion is fatal and stops the
+  run; a per-minute limit is not.
+
+Model IDs are config values, not constants, because they move faster than this
+file — `python scamscan.py models` lists what a key can actually reach.
+
 **Scraped platforms stay absent; official APIs are fine.** Instagram, TikTok,
 LinkedIn and Facebook have no usable public API, prohibit scraping, and fail
 *silently* — a scraper returns an empty list and you believe you have coverage.

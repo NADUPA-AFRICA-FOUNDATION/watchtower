@@ -128,6 +128,7 @@ async def require_password(request, call_next):
 def list_sources():
     cfg = config()
     enricher = Enricher([], cfg.get("enrichment", {}).get("categories", []))
+    from core.enrich import available_provider
     # `available` is about credentials actually being present, which is not the
     # same question as `default`. opensanctions is both a default and key-gated,
     # so keying the UI off `default` left it selected and silently returning
@@ -149,6 +150,7 @@ def list_sources():
             for n in BACKENDS
         ],
         "ai_available": enricher.enabled,
+        "ai_provider": available_provider() or "none",
         "ephemeral_storage": EPHEMERAL,
     }
 
@@ -327,6 +329,7 @@ def scamscan_status():
     lex = cfg["lexicon"]
     unverified = sum(1 for group in lex.values() for entry in group.values()
                      if scamscan.term_weight(entry)[1] in ("", "UNVERIFIED"))
+    which = scamscan.provider(cfg)
     con = scamscan.db_connect(str(data_path("scamscan.db")))
     try:
         rows = dict(con.execute(
@@ -339,7 +342,8 @@ def scamscan_status():
         "topics": len(cfg["seed_topics"]),
         "queries_per_topic": cfg["search"]["queries_per_topic"],
         "max_uses_per_query": cfg["search"]["max_uses_per_query"],
-        "model": cfg["search"]["model"],
+        "provider": which or "none",
+        "model": scamscan.model_for(cfg),
         "search_tool": tool_note,
         "structured_outputs": bool(cfg["search"].get("structured_outputs", True)),
         "review_threshold": cfg["scoring"]["review_threshold"],
@@ -349,7 +353,7 @@ def scamscan_status():
         "unverified_terms": unverified,
         # hunt spends money; the UI disables the button rather than letting
         # someone click it and read a 500 as "no scams found".
-        "api_available": bool(os.environ.get("ANTHROPIC_API_KEY")),
+        "api_available": bool(which and scamscan.provider_key(which)),
         "ephemeral_storage": EPHEMERAL,
         "queue": rows,
         "total": sum(rows.values()),
@@ -459,8 +463,10 @@ def scamscan_hunt(topics: int = Query(1, ge=1, le=20)):
     so `topics` is capped and the UI states the ceiling before you click.
     """
     cfg = scamscan_config()
-    if not os.environ.get("ANTHROPIC_API_KEY"):
-        raise HTTPException(503, "ANTHROPIC_API_KEY is not set — a hunt needs it")
+    which = scamscan.provider(cfg)
+    if not which:
+        raise HTTPException(503, "No model API key — set GEMINI_API_KEY "
+                                 "(free tier) or ANTHROPIC_API_KEY")
 
     events: queue.Queue = queue.Queue()
     holder: dict = {}
@@ -470,7 +476,7 @@ def scamscan_hunt(topics: int = Query(1, ge=1, le=20)):
         try:
             con = scamscan.db_connect(str(data_path("scamscan.db")))
             holder["summary"] = scamscan.hunt(
-                scamscan.anthropic.Anthropic(), cfg, con, topics, events.put)
+                scamscan.make_client(which), cfg, con, topics, events.put)
         except Exception as e:
             holder["error"] = f"{type(e).__name__}: {e}"
         finally:

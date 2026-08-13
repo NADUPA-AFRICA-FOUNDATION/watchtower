@@ -15,3 +15,4 @@ anthropic>=0.40
 # Web UI (python run.py serve)
 fastapi>=0.115
 uvicorn>=0.30
+google-genai>=1.47.0   # Gemini provider (free tier)

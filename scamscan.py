@@ -27,7 +27,16 @@ import sys
 import unicodedata
 from datetime import datetime, timezone
 
-import anthropic
+try:
+    import anthropic
+except ImportError:
+    anthropic = None
+
+try:
+    from google import genai
+    from google.genai import types as genai_types
+except ImportError:
+    genai = genai_types = None
 
 DB_PATH = "scamscan.db"
 
@@ -467,9 +476,44 @@ DYNAMIC_FILTERING_MODELS = (
 )
 
 
+def provider(cfg=None):
+    """Which model API this run will use.
+
+    Gemini first when its key is present — it has a free tier, and a depleted
+    Anthropic balance is the common case here. `search.provider` in the config
+    or SCAMSCAN_PROVIDER in the environment forces one.
+    """
+    choice = ((cfg or {}).get("search", {}).get("provider")
+              or os.environ.get("SCAMSCAN_PROVIDER", "")).lower()
+    if choice in ("gemini", "anthropic"):
+        return choice
+    if os.environ.get("GEMINI_API_KEY") and genai is not None:
+        return "gemini"
+    if os.environ.get("ANTHROPIC_API_KEY") and anthropic is not None:
+        return "anthropic"
+    return ""
+
+
+def provider_key(which):
+    return os.environ.get(
+        "GEMINI_API_KEY" if which == "gemini" else "ANTHROPIC_API_KEY", "")
+
+
+def make_client(which):
+    if which == "gemini":
+        return genai.Client(api_key=provider_key("gemini"))
+    return anthropic.Anthropic()
+
+
 def web_search_tool(cfg):
     """Return (tool_block, note). The note names the version actually used."""
     s = cfg["search"]
+    if provider(cfg) == "gemini":
+        # Gemini's grounding tool is not versioned the way Anthropic's is; the
+        # blocklist moves onto the tool itself rather than being a sibling key.
+        tool = genai_types.Tool(google_search=genai_types.GoogleSearch(
+            exclude_domains=list(s.get("blocked_domains") or []) or None))
+        return tool, f"google_search grounding ({s.get('gemini_model', GEMINI_MODEL)})"
     model = s.get("model", "")
     override = s.get("web_search_tool_version")
     if override:
@@ -513,12 +557,76 @@ def structured_rejected(exc):
     propagating — quietly downgrading on every 400 would turn an outage into a
     silently worse run, which is the failure mode this tool exists to avoid.
     """
-    if getattr(exc, "status_code", None) != 400:
+    status = getattr(exc, "status_code", None) or getattr(exc, "code", None)
+    if status not in (400, "INVALID_ARGUMENT"):
         return False
     msg = str(exc).lower()
     return any(k in msg for k in
                ("output_config", "output_format", "output format",
-                "json_schema", "structured output"))
+                "json_schema", "structured output",
+                # Gemini's wording when a schema is refused alongside a tool.
+                "response_schema", "response_json_schema", "response_mime_type"))
+
+
+GEMINI_MODEL = os.environ.get("SCAMSCAN_GEMINI_MODEL", "gemini-2.5-flash")
+
+# Terminal reasons that mean the model refused rather than reported nothing.
+GEMINI_REFUSALS = {"SAFETY", "PROHIBITED_CONTENT", "BLOCKLIST", "RECITATION", "SPII"}
+
+
+def _enum_name(value):
+    return getattr(value, "name", None) or (str(value).rsplit(".", 1)[-1] if value else "")
+
+
+def grounding_failures(resp, expected_search=True) -> list:
+    """Gemini's version of the silent zero, and it is a different shape.
+
+    Anthropic reports a failed search as an error object inside a 200. Gemini
+    just answers anyway, from the model's own memory, and the only evidence is
+    negative: `grounding_metadata.web_search_queries` is empty. An ungrounded
+    answer to "search for scam pages" is not a search that found nothing — it
+    is a query that never ran, and it is the more dangerous of the two because
+    the text comes back looking perfectly well formed.
+    """
+    failures = []
+    blocked = _enum_name(getattr(getattr(resp, "prompt_feedback", None),
+                                 "block_reason", None))
+    if blocked and blocked != "BLOCKED_REASON_UNSPECIFIED":
+        failures.append(f"prompt blocked: {blocked}")
+
+    candidates = getattr(resp, "candidates", None) or []
+    if not candidates:
+        failures.append("no candidates returned")
+        return failures
+
+    grounded = False
+    for c in candidates:
+        reason = _enum_name(getattr(c, "finish_reason", None))
+        if reason in GEMINI_REFUSALS:
+            failures.append(f"finish_reason={reason}")
+        meta = getattr(c, "grounding_metadata", None)
+        if getattr(meta, "web_search_queries", None) or getattr(meta, "grounding_chunks", None):
+            grounded = True
+
+    if expected_search and not grounded and not failures:
+        failures.append("answered without searching (no grounding metadata)")
+    return failures
+
+
+def call_gemini(client, model, prompt, tools=None, max_tokens=4000, schema=None):
+    config = {"max_output_tokens": max_tokens}
+    if tools:
+        config["tools"] = tools
+    if schema:
+        # Gemini's equivalent of output_config.format. Unlike Anthropic's, the
+        # docs say this composes with google_search on Gemini 3 models — but
+        # _ask still detects a rejection rather than assuming either way.
+        config["response_mime_type"] = "application/json"
+        config["response_json_schema"] = schema
+    resp = client.models.generate_content(
+        model=model, contents=prompt,
+        config=genai_types.GenerateContentConfig(**config))
+    return (resp.text or ""), resp
 
 
 def call_claude(client, model, prompt, tools=None, max_tokens=4000, schema=None):
@@ -585,11 +693,12 @@ def parse_payload(text, key, strict):
 
 def _ask(client, cfg, model, prompt, key, schema, state, tools=None, max_tokens=4000):
     """One call, structured if the API allows it, with a visible downgrade if not."""
+    call = call_gemini if provider(cfg) == "gemini" else call_claude
     use_schema = cfg["search"].get("structured_outputs", True) and not state.structured_disabled
     if use_schema:
         try:
-            text, resp = call_claude(client, model, prompt, tools=tools,
-                                     max_tokens=max_tokens, schema=schema)
+            text, resp = call(client, model, prompt, tools=tools,
+                              max_tokens=max_tokens, schema=schema)
             return text, resp, True
         except Exception as e:
             if not structured_rejected(e):
@@ -599,9 +708,23 @@ def _ask(client, cfg, model, prompt, key, schema, state, tools=None, max_tokens=
                   "back to text parsing for the rest of the run")
             print(f"      reason: {state.structured_disabled}")
 
-    text, resp = call_claude(client, model, prompt + JSON_MODE_SUFFIX.format(key=key),
-                             tools=tools, max_tokens=max_tokens)
+    text, resp = call(client, model, prompt + JSON_MODE_SUFFIX.format(key=key),
+                      tools=tools, max_tokens=max_tokens)
     return text, resp, False
+
+
+def run_failures(resp, cfg, expected_search=True) -> list:
+    """Every way this response can mean 'the query did not run', by provider."""
+    if provider(cfg) == "gemini":
+        return grounding_failures(resp, expected_search)
+    return search_failures(resp)
+
+
+def model_for(cfg):
+    s = cfg["search"]
+    if provider(cfg) == "gemini":
+        return s.get("gemini_model", GEMINI_MODEL)
+    return s["model"]
 
 
 def expand_queries(client, cfg, topic, state=None):
@@ -612,7 +735,9 @@ def expand_queries(client, cfg, topic, state=None):
         topic=topic,
         n=cfg["search"]["queries_per_topic"],
     )
-    text, _, strict = _ask(client, cfg, cfg["search"]["expansion_model"], prompt,
+    model = (model_for(cfg) if provider(cfg) == "gemini"
+             else cfg["search"]["expansion_model"])
+    text, _, strict = _ask(client, cfg, model, prompt,
                            "queries", QUERIES_SCHEMA, state, max_tokens=800)
     queries = [q for q in parse_payload(text, "queries", strict) if isinstance(q, str)]
     if not queries:
@@ -630,7 +755,7 @@ def hunt_query(client, cfg, query, state=None, progress=None):
 
     prompt = HUNT_PROMPT.format(brand=cfg["brand"]["name"], query=query,
                                 scam_types=", ".join(SCAM_TYPES))
-    text, resp, strict = _ask(client, cfg, s["model"], prompt, "findings",
+    text, resp, strict = _ask(client, cfg, model_for(cfg), prompt, "findings",
                               FINDINGS_SCHEMA, state, tools=[tool])
 
     # Order matters: check why the turn ended before trusting what it produced.
@@ -641,12 +766,18 @@ def hunt_query(client, cfg, query, state=None, progress=None):
         # to [] and print as "no scams found".
         raise HuntError("the model declined this query (stop_reason=refusal)")
 
-    failed = search_failures(resp)
+    failed = run_failures(resp, cfg)
     if failed:
         raise HuntError("web search failed: " + ", ".join(sorted(set(failed))))
 
     findings = [f for f in parse_payload(text, "findings", strict)
                 if isinstance(f, dict) and f.get("url")]
+
+    # Gemini's analogue of pause_turn: the answer was cut off mid-JSON.
+    if _enum_name(getattr((getattr(resp, "candidates", None) or [None])[0],
+                          "finish_reason", None)) == "MAX_TOKENS":
+        progress({"type": "note", "message": (
+            "the model hit max_output_tokens — results are partial")})
 
     if stop == "pause_turn":
         # The server-side tool loop hit its iteration cap. Whatever came back is
@@ -676,7 +807,7 @@ def hunt(client, cfg, con, topics=None, progress=None, state=None):
 
     summary = {"seen": 0, "new": 0, "queries_run": 0, "failures": [],
                "topics": len(seeds), "tool": tool_note,
-               "model": cfg["search"]["model"],
+               "model": model_for(cfg), "provider": provider(cfg),
                "structured": bool(cfg["search"].get("structured_outputs", True)),
                "escalated": 0}
     progress({"type": "start", **summary})
@@ -738,9 +869,11 @@ def hunt(client, cfg, con, topics=None, progress=None, state=None):
 
 def cmd_hunt(args):
     cfg = json.load(open(args.config))
-    if not os.environ.get("ANTHROPIC_API_KEY"):
-        sys.exit("ANTHROPIC_API_KEY is not set.")
-    client = anthropic.Anthropic()
+    which = provider(cfg)
+    if not which:
+        sys.exit("No model API key. Set GEMINI_API_KEY (free tier) or "
+                 "ANTHROPIC_API_KEY.")
+    client = make_client(which)
     con = db_connect(args.db)
 
     def render(e):
@@ -884,10 +1017,15 @@ def cmd_selftest(args):
             print(f"        {p}")
         ok &= not problems
 
+    print("\nprovider")
+    which = provider(cfg) or "none (no key set)"
+    print(f"  {which}  model {model_for(cfg)}"
+          f"{'  [key present]' if provider(cfg) and provider_key(provider(cfg)) else '  [NO KEY]'}")
+
     print("\nweb search tool")
     _, note = web_search_tool(cfg)
-    print(f"  {cfg['search']['model']} -> {note}")
-    if WEB_SEARCH_DYNAMIC not in note:
+    print(f"  {model_for(cfg)} -> {note}")
+    if provider(cfg) != "gemini" and WEB_SEARCH_DYNAMIC not in note:
         print(f"  note: dynamic filtering needs one of {DYNAMIC_FILTERING_MODELS}")
 
     print("\nlexicon")
@@ -906,24 +1044,32 @@ def cmd_selftest(args):
               "outputs\ncomposes with server-side web search (costs ~1 search).")
         return 0 if ok else 1
 
-    if not os.environ.get("ANTHROPIC_API_KEY"):
-        sys.exit("ANTHROPIC_API_KEY is not set.")
-    client = anthropic.Anthropic()
+    which = provider(cfg)
+    if not which:
+        sys.exit("No model API key. Set GEMINI_API_KEY or ANTHROPIC_API_KEY.")
+    client = make_client(which)
     tool, _ = web_search_tool(cfg)
-    tool = {**tool, "max_uses": 1}
+    if which == "anthropic":
+        tool = {**tool, "max_uses": 1}
 
     print("\nlive")
     for label, tools in (("structured, no tools", None),
                          ("structured + web search", [tool])):
         try:
-            text, resp = call_claude(
-                client, cfg["search"]["model"],
+            call = call_gemini if which == "gemini" else call_claude
+            text, resp = call(
+                client, model_for(cfg),
                 "Report no findings." if tools is None else
                 f"Search once for {cfg['brand']['name']} and report no findings.",
                 tools=tools, max_tokens=2000, schema=FINDINGS_SCHEMA)
             payload = parse_payload(text, "findings", strict=True)
-            print(f"  PASS  {label}: stop_reason="
-                  f"{getattr(resp, 'stop_reason', '?')}, findings={len(payload)}")
+            # An ungrounded answer on the search leg is the whole question:
+            # it means the schema was accepted but the search never ran.
+            notes = run_failures(resp, cfg, expected_search=tools is not None)
+            print(f"  {'FAIL' if notes else 'PASS'}  {label}: "
+                  f"findings={len(payload)}"
+                  f"{'  ' + '; '.join(notes) if notes else ''}")
+            ok &= not notes
         except Exception as e:
             ok = False
             verdict = "INCOMPATIBLE" if structured_rejected(e) else "ERROR"
@@ -931,6 +1077,28 @@ def cmd_selftest(args):
 
     print("\n" + ("ALL CHECKS PASSED" if ok else "SOME CHECKS FAILED"))
     return 0 if ok else 1
+
+
+def cmd_models(args):
+    """List the models this key can actually reach.
+
+    Model IDs move faster than this file does and a free-tier key does not see
+    all of them, so the config default is a starting point, not a promise.
+    """
+    cfg = json.load(open(args.config))
+    which = provider(cfg)
+    if not which:
+        sys.exit("No model API key. Set GEMINI_API_KEY or ANTHROPIC_API_KEY.")
+    client = make_client(which)
+    print(f"provider: {which}   (config default: {model_for(cfg)})\n")
+    if which == "gemini":
+        for m in client.models.list():
+            actions = getattr(m, "supported_actions", None) or []
+            if not actions or "generateContent" in actions:
+                print(f"  {m.name.replace('models/', ''):40} {getattr(m, 'display_name', '')}")
+    else:
+        for m in client.models.list(limit=20).data:
+            print(f"  {m.id:40} {getattr(m, 'display_name', '')}")
 
 
 def main():
@@ -967,6 +1135,10 @@ def main():
     t.add_argument("--confidence", type=float, default=None)
     t.add_argument("--config", default="config.json")
     t.set_defaults(func=cmd_test)
+
+    mo = sub.add_parser("models", help="list models this API key can reach")
+    mo.add_argument("--config", default="config.json")
+    mo.set_defaults(func=cmd_models)
 
     st = sub.add_parser("selftest", help="check the request shape; --live hits the API")
     st.add_argument("--config", default="config.json")

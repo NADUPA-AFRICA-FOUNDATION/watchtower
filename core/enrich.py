@@ -13,14 +13,66 @@ from __future__ import annotations
 
 import json
 import os
+import random
+import time
 
 try:
     import anthropic
 except ImportError:
     anthropic = None
 
+try:
+    from google import genai
+    from google.genai import types as genai_types
+except ImportError:
+    genai = genai_types = None
+
 TRIAGE_MODEL = "claude-haiku-4-5-20251001"
 DEEP_MODEL = "claude-sonnet-5"
+
+# Gemini equivalents of the same two tiers. Overridable, because model IDs move
+# faster than this file does and a free-tier key does not see all of them —
+# `python run.py models` lists what your key can actually reach.
+GEMINI_TRIAGE_MODEL = os.environ.get("GEMINI_TRIAGE_MODEL", "gemini-2.5-flash")
+GEMINI_DEEP_MODEL = os.environ.get("GEMINI_DEEP_MODEL", "gemini-2.5-pro")
+
+# Free-tier Gemini keys are rate limited per minute, and a sweep enriches up to
+# --max-ai items back to back. Without a retry the tail of every sweep would
+# come back unscored and look like a run of irrelevant articles.
+RATE_LIMIT_RETRIES = 3
+
+
+def available_provider(explicit: str = "") -> str:
+    """Which provider this process can actually use, in preference order.
+
+    Gemini first when its key is present: it has a usable free tier, and the
+    common case for this repo is a depleted Anthropic balance. Set
+    WATCHTOWER_LLM_PROVIDER to force one.
+    """
+    choice = (explicit or os.environ.get("WATCHTOWER_LLM_PROVIDER", "")).lower()
+    if choice in ("gemini", "anthropic"):
+        return choice
+    if os.environ.get("GEMINI_API_KEY") and genai is not None:
+        return "gemini"
+    if os.environ.get("ANTHROPIC_API_KEY") and anthropic is not None:
+        return "anthropic"
+    return ""
+
+
+# The same shape as EXTRACT_TOOL's input_schema. Anthropic gets it as a tool
+# that must be called; Gemini gets it as response_json_schema. Both end up
+# forcing valid JSON, so neither path ever regex-parses model prose.
+RECORD_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "summary": {"type": "string"},
+        "entities": {"type": "array", "items": {"type": "string"}},
+        "categories": {"type": "array", "items": {"type": "string"}},
+        "relevance": {"type": "integer"},
+        "reasoning": {"type": "string"},
+    },
+    "required": ["summary", "entities", "categories", "relevance"],
+}
 
 EXTRACT_TOOL = {
     "name": "record",
@@ -87,32 +139,88 @@ def _fatal_reason(exc) -> str | None:
     A depleted balance or a rejected key is not per-item bad luck: retrying it
     across 25 candidates burns 25 round trips to produce 25 identical errors,
     and leaves the run looking like it was scored when it wasn't. Rate limits
-    and timeouts are deliberately NOT fatal — those are worth continuing past.
+    and timeouts are deliberately NOT fatal — those are worth continuing past,
+    and on a free-tier Gemini key a per-minute limit is the normal case rather
+    than an outage.
     """
-    status = getattr(exc, "status_code", None)
+    status = getattr(exc, "status_code", None) or getattr(exc, "code", None)
     msg = str(exc).lower()
-    if status in (401, 403):
-        return "Anthropic API key was rejected"
+    if status in (401, 403) or "api key not valid" in msg or "permission_denied" in msg:
+        return "API key was rejected"
     if status == 400 and "credit balance" in msg:
         return "Anthropic credit balance is too low"
+    # Gemini reports an exhausted daily free-tier allowance as RESOURCE_EXHAUSTED
+    # with a per-day quota metric. Per-minute limits use the same status, so the
+    # daily marker is what separates "wait a moment" from "come back tomorrow".
+    if "resource_exhausted" in msg or status == 429:
+        if "per day" in msg or "perday" in msg or "daily" in msg:
+            return "Gemini free-tier daily quota is exhausted"
     return None
+
+
+def _is_rate_limit(exc) -> bool:
+    status = getattr(exc, "status_code", None) or getattr(exc, "code", None)
+    return status == 429 or "resource_exhausted" in str(exc).lower()
 
 
 class Enricher:
     def __init__(self, watchlist: list[str], categories: list[str],
-                 escalate_above: int = 60, api_key: str | None = None):
+                 escalate_above: int = 60, api_key: str | None = None,
+                 provider: str = ""):
         self.watchlist = watchlist
         self.categories = categories
         self.escalate_above = escalate_above
-        key = api_key or os.environ.get("ANTHROPIC_API_KEY")
-        self.enabled = bool(key) and anthropic is not None
-        self.client = anthropic.Anthropic(api_key=key) if self.enabled else None
+        self.provider = available_provider(provider)
+        if self.provider == "gemini":
+            key = api_key or os.environ.get("GEMINI_API_KEY")
+            self.enabled = bool(key) and genai is not None
+            self.client = genai.Client(api_key=key) if self.enabled else None
+            self.triage_model, self.deep_model = GEMINI_TRIAGE_MODEL, GEMINI_DEEP_MODEL
+        elif self.provider == "anthropic":
+            key = api_key or os.environ.get("ANTHROPIC_API_KEY")
+            self.enabled = bool(key) and anthropic is not None
+            self.client = anthropic.Anthropic(api_key=key) if self.enabled else None
+            self.triage_model, self.deep_model = TRIAGE_MODEL, DEEP_MODEL
+        else:
+            self.enabled, self.client = False, None
+            self.triage_model, self.deep_model = TRIAGE_MODEL, DEEP_MODEL
         self.instructions = _instructions(watchlist, categories)
         # Set once an account-level failure is seen, which also flips `enabled`
         # off so the rest of the run falls back to keyword ranking immediately.
         self.fatal_error: str | None = None
 
+    def _call_gemini(self, model: str, title: str, text: str,
+                     focus: str = "") -> dict | None:
+        head = f"SEARCH FOCUS: {focus}\n\n" if focus else ""
+        last = None
+        for attempt in range(RATE_LIMIT_RETRIES):
+            try:
+                resp = self.client.models.generate_content(
+                    model=model,
+                    contents=f"{head}TITLE: {title}\n\nBODY:\n{text}",
+                    config=genai_types.GenerateContentConfig(
+                        # Constant across every item in the run, which is what
+                        # makes Gemini's implicit caching fire — the same reason
+                        # `focus` stays in the user turn on the Anthropic path.
+                        system_instruction=self.instructions,
+                        response_mime_type="application/json",
+                        response_json_schema=RECORD_SCHEMA,
+                        max_output_tokens=1024,
+                    ),
+                )
+                return json.loads(resp.text)
+            except Exception as e:
+                last = e
+                if not _is_rate_limit(e) or _fatal_reason(e):
+                    raise
+                # Jittered, so 25 candidates in one sweep don't all wake up
+                # together and hit the per-minute limit again as a block.
+                time.sleep((2 ** attempt) + random.uniform(0, 1))
+        raise last
+
     def _call(self, model: str, title: str, text: str, focus: str = "") -> dict | None:
+        if self.provider == "gemini":
+            return self._call_gemini(model, title, text, focus)
         # focus goes in the user turn, not the system block, so the cached
         # prefix stays identical across different queries in the same process.
         head = f"SEARCH FOCUS: {focus}\n\n" if focus else ""
@@ -148,17 +256,17 @@ class Enricher:
             return {"summary": "", "entities": [], "categories": [],
                     "relevance": 0, "skipped": "no API key"}
         try:
-            out = self._call(TRIAGE_MODEL, title, text, focus)
+            out = self._call(self.triage_model, title, text, focus)
             if out is None:
                 return {"summary": "", "entities": [], "categories": [],
                         "relevance": 0, "skipped": "no tool call returned"}
             if out.get("relevance", 0) >= self.escalate_above:
-                deep = self._call(DEEP_MODEL, title, text, focus)
+                deep = self._call(self.deep_model, title, text, focus)
                 if deep:
                     out = deep
-                    out["model"] = DEEP_MODEL
+                    out["model"] = self.deep_model
             else:
-                out["model"] = TRIAGE_MODEL
+                out["model"] = self.triage_model
             return out
         except Exception as e:
             fatal = _fatal_reason(e)
@@ -173,12 +281,22 @@ class Enricher:
                     "relevance": 0, "skipped": f"{type(e).__name__}: {e}"}
 
 
-def digest(items: list[dict], api_key: str | None = None) -> str:
+BRIEF_INSTRUCTION = (
+    "Write a short monitoring brief from the items below. Lead with what "
+    "actually changed. Group related items rather than listing them one by "
+    "one. Say plainly if nothing significant came through. Do not pad, do "
+    "not add a closing summary paragraph, and do not use headers unless "
+    "there are genuinely distinct themes."
+)
+
+
+def digest(items: list[dict], api_key: str | None = None,
+           provider: str = "") -> str:
     """One narrative brief over a batch. Run this after enrichment, over the
     summaries rather than the full texts, so a 200-item digest stays cheap."""
-    key = api_key or os.environ.get("ANTHROPIC_API_KEY")
-    if not key or anthropic is None:
-        return "(digest skipped: no ANTHROPIC_API_KEY set)"
+    which = available_provider(provider)
+    if not which:
+        return "(digest skipped: set GEMINI_API_KEY or ANTHROPIC_API_KEY)"
     if not items:
         return "(nothing new to report)"
 
@@ -187,7 +305,18 @@ def digest(items: list[dict], api_key: str | None = None) -> str:
         f"    {i.get('summary', '') or i.get('text', '')[:200]}"
         for i in items
     ]
-    client = anthropic.Anthropic(api_key=key)
+
+    if which == "gemini":
+        client = genai.Client(api_key=api_key or os.environ.get("GEMINI_API_KEY"))
+        resp = client.models.generate_content(
+            model=GEMINI_DEEP_MODEL,
+            contents="\n".join(lines),
+            config=genai_types.GenerateContentConfig(
+                system_instruction=BRIEF_INSTRUCTION, max_output_tokens=1500),
+        )
+        return resp.text or ""
+
+    client = anthropic.Anthropic(api_key=api_key or os.environ.get("ANTHROPIC_API_KEY"))
     resp = client.messages.create(
         model=DEEP_MODEL,
         max_tokens=1500,

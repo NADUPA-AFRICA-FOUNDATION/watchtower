@@ -16,10 +16,26 @@ analyst workload is computed in auditable code, not inside a prompt.
 ## Setup
 
 ```bash
-pip install anthropic
-export ANTHROPIC_API_KEY=sk-ant-...      # from platform.claude.com -> Settings -> API keys
+pip install -r requirements.txt
+# Either provider. Gemini is picked first when both keys are set — it has a
+# free tier. Force one with SCAMSCAN_PROVIDER or search.provider in config.json.
+export GEMINI_API_KEY=...                # aistudio.google.com/api-keys (free)
+export ANTHROPIC_API_KEY=sk-ant-...      # platform.claude.com -> API keys
+
+python scamscan.py models                # what your key can actually reach
+python scamscan.py selftest              # free: config, schemas, lexicon
 python scamscan.py hunt --config config.json --topics 1   # start with one topic
 ```
+
+**The provider changes the failure shape, not the pipeline.** Anthropic reports
+a failed search as an error object inside a 200; Gemini answers anyway from the
+model's own memory and the only evidence is negative — no grounding metadata.
+The second is more dangerous, because the text comes back looking perfectly well
+formed. `grounding_failures()` treats an ungrounded answer to a search query as
+a query that never ran, and raises `HuntError` exactly like the Anthropic path.
+
+Gemini free-tier keys are rate limited per minute; a daily quota exhaustion
+stops the run and says so, a per-minute limit is retried with backoff.
 
 ## Commands
 

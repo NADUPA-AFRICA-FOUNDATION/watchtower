@@ -10,6 +10,7 @@ silent failure is a false negative someone acts on.
 
 import io
 import json
+import os
 import sqlite3
 import sys
 from contextlib import redirect_stdout
@@ -24,6 +25,7 @@ from scamscan import (DYNAMIC_FILTERING_MODELS, FINDINGS_SCHEMA,
                       fingerprint, hunt_query, impersonation_score,
                       lexicon_score, lint_schema, parse_json_array,
                       parse_payload, registrable, score_finding,
+                      grounding_failures, model_for, provider,
                       search_failures, structured_rejected, term_pattern,
                       term_weight, web_search_tool)
 
@@ -395,6 +397,75 @@ def main():
     ok &= check("a run where everything searched is complete",
                 clean["complete"] is True and not clean["failures"])
     con.close()
+
+    print("\ngemini: the silent zero has a different shape and must still close")
+    # Anthropic reports a failed search as an error object inside a 200. Gemini
+    # just answers from memory and the only evidence is negative — no grounding
+    # metadata. That is a query that never ran, not a clean brand.
+    class GMeta:
+        def __init__(self, queries=None, chunks=None):
+            self.web_search_queries = queries
+            self.grounding_chunks = chunks
+
+    class GCand:
+        def __init__(self, finish="STOP", meta=None):
+            self.finish_reason = finish
+            self.grounding_metadata = meta
+
+    class GFeedback:
+        def __init__(self, reason=None):
+            self.block_reason = reason
+
+    class GResp:
+        def __init__(self, candidates, feedback=None, text='{"findings": []}'):
+            self.candidates = candidates
+            self.prompt_feedback = feedback
+            self.text = text
+
+    grounded = GResp([GCand(meta=GMeta(queries=["mpesa scam"]))])
+    ok &= check("a grounded answer reports no failure",
+                grounding_failures(grounded) == [])
+    ok &= check("an ungrounded answer to a search query is a failure",
+                grounding_failures(GResp([GCand(meta=GMeta())])) != [])
+    ok &= check("and names what actually went wrong",
+                "without searching" in grounding_failures(GResp([GCand()]))[0])
+    ok &= check("a safety stop is a failure, not an empty result",
+                grounding_failures(GResp([GCand(finish="SAFETY",
+                                                meta=GMeta(["q"]))])) != [])
+    ok &= check("a blocked prompt is caught before the text is read",
+                grounding_failures(GResp([GCand(meta=GMeta(["q"]))],
+                                         GFeedback("PROHIBITED_CONTENT"))) != [])
+    ok &= check("no candidates at all is a failure", grounding_failures(GResp([])) != [])
+    # Expansion runs without the search tool, so ungrounded is correct there.
+    ok &= check("a toolless call is not expected to be grounded",
+                grounding_failures(GResp([GCand()]), expected_search=False) == [])
+
+    print("\nprovider selection follows the key that is actually set")
+    saved = {k: os.environ.get(k) for k in ("GEMINI_API_KEY", "ANTHROPIC_API_KEY",
+                                            "SCAMSCAN_PROVIDER")}
+    try:
+        for k in saved:
+            os.environ.pop(k, None)
+        ok &= check("no key means no provider, rather than a crash", provider({}) == "")
+        os.environ["ANTHROPIC_API_KEY"] = "a"
+        ok &= check("anthropic alone is picked", provider({}) == "anthropic")
+        os.environ["GEMINI_API_KEY"] = "g"
+        ok &= check("gemini wins when both are set — it has the free tier",
+                    provider({}) == "gemini")
+        ok &= check("config can force the other way",
+                    provider({"search": {"provider": "anthropic"}}) == "anthropic")
+        ok &= check("and the model follows the provider",
+                    model_for({"search": {"provider": "anthropic",
+                                          "model": "claude-x"}}) == "claude-x")
+        ok &= check("a gemini 400 about response_schema still downgrades",
+                    structured_rejected(
+                        ApiError("response_json_schema is not supported with tools")))
+    finally:
+        for k, v in saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
 
     print("\nexpansion has no web search, so an empty result is never legitimate")
     state = RunState()
