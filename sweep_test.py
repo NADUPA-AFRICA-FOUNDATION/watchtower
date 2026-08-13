@@ -265,6 +265,38 @@ def main():
                 "INCOMPLETE" in report.terminal(broke))
     df.close()
 
+    print("\nsweep time budget (serverless hosts kill long requests)")
+    import core.sweep as SW
+    slow_backends = dict(SW.BACKENDS)
+
+    def crawler(query, fetcher, hours=72, limit=40):
+        time.sleep(5.0)
+        return [Item(url="https://slow.example/1", source="slow",
+                     source_type="news", title="too late")]
+
+    def quick(query, fetcher, hours=72, limit=40):
+        return [Item(url="https://quick.example/1", source="quick",
+                     source_type="news", title="beneficial ownership Kenya")]
+
+    SW.BACKENDS = {"quick": quick, "slow": crawler}
+    try:
+        t0 = time.monotonic()
+        budgeted = sweep(QUERY, fetcher, backends=["quick", "slow"],
+                         fetch_bodies=False, budget=1.0)
+        elapsed = time.monotonic() - t0
+        ok &= check("a sweep returns within its budget", elapsed < 4.0)
+        ok &= check("the source that ran is kept",
+                    budgeted.per_source.get("quick") == 1)
+        ok &= check("the source that ran out of time is marked unsearched",
+                    "slow" in budgeted.skipped)
+        ok &= check("running out of time is not reported as a zero",
+                    not budgeted.complete)
+        ok &= check("no budget means no deadline",
+                    sweep(QUERY, fetcher, backends=["quick"],
+                          fetch_bodies=False).complete)
+    finally:
+        SW.BACKENDS = slow_backends
+
     print("\nfailure handling")
     bad = sweep("nothing matches here", fetcher, hours=24,
                 backends=["gdelt", "nonexistent_backend"], fetch_bodies=False)

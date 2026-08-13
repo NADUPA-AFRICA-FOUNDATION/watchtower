@@ -165,6 +165,48 @@ def main():
         webapp.config = real_config
         shutil.rmtree(tmpdir, ignore_errors=True)
 
+    print("\nserverless deployment guards")
+    import importlib
+    # Re-import the app as if it were running on Vercel with no password set.
+    saved = dict(os.environ)
+    os.environ["VERCEL"] = "1"
+    os.environ.pop("WATCHTOWER_PASSWORD", None)
+    try:
+        prod = importlib.reload(webapp)
+        pc = TestClient(prod.app)
+        ok &= check("storage moves off the read-only bundle",
+                    str(prod.DATA_DIR).startswith("/tmp"))
+        ok &= check("and knows that storage is ephemeral", prod.EPHEMERAL is True)
+        ok &= check("a sweep gets a time budget under the platform timeout",
+                    0 < prod.SWEEP_BUDGET < 300)
+        # Fail closed: no password on a public host must not serve the app.
+        ok &= check("refuses to serve publicly with no password set",
+                    pc.get("/api/sources").status_code == 503)
+        ok &= check("and says why", "WATCHTOWER_PASSWORD"
+                    in pc.get("/api/sources").json()["detail"])
+
+        os.environ["WATCHTOWER_PASSWORD"] = "hunter2"
+        prod = importlib.reload(webapp)
+        pc = TestClient(prod.app)
+        ok &= check("still refuses without credentials",
+                    pc.get("/api/sources").status_code == 401)
+        ok &= check("challenges with Basic",
+                    "Basic" in pc.get("/api/sources").headers.get("www-authenticate", ""))
+        ok &= check("rejects a wrong password",
+                    pc.get("/api/sources", auth=("watchtower", "wrong")).status_code == 401)
+        ok &= check("accepts the right one",
+                    pc.get("/api/sources", auth=("watchtower", "hunter2")).status_code == 200)
+        ok &= check("and tells the UI storage is ephemeral",
+                    pc.get("/api/sources", auth=("watchtower", "hunter2"))
+                      .json()["ephemeral_storage"] is True)
+    finally:
+        os.environ.clear()
+        os.environ.update(saved)
+        webapp_reloaded = importlib.reload(webapp)
+        ok &= check("local runs keep no-auth, on-disk storage",
+                    not webapp_reloaded.SERVERLESS
+                    and webapp_reloaded.EPHEMERAL is False)
+
     print("\nfrontend wiring")
     import re
     static = Path(__file__).parent / "web" / "static"

@@ -10,16 +10,18 @@ pushes events onto a queue that the response generator drains.
 
 from __future__ import annotations
 
+import base64
 import json
 import os
 import queue
+import secrets
 import threading
 from dataclasses import asdict
 from pathlib import Path
 
 import yaml
 from fastapi import FastAPI, HTTPException, Query
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from core import report
@@ -32,6 +34,26 @@ from core.sweep import sweep
 ROOT = Path(__file__).resolve().parent.parent
 STATIC = Path(__file__).resolve().parent / "static"
 
+# On a serverless host the deployment bundle is read-only and only /tmp can be
+# written. The archive and the generated reports both write, so they have to
+# move — but /tmp does not survive between invocations, so anything "saved"
+# there is gone by the next request. That is a real limitation, not a detail:
+# EPHEMERAL is surfaced through /api/sources so the UI can say so out loud
+# rather than letting someone believe they have an archive they don't.
+_EXPLICIT_DATA_DIR = os.environ.get("WATCHTOWER_DATA_DIR")
+SERVERLESS = bool(os.environ.get("VERCEL") or os.environ.get("AWS_LAMBDA_FUNCTION_NAME"))
+DATA_DIR = Path(_EXPLICIT_DATA_DIR) if _EXPLICIT_DATA_DIR else (
+    Path("/tmp/watchtower") if SERVERLESS else ROOT)
+EPHEMERAL = SERVERLESS and not _EXPLICIT_DATA_DIR
+
+# Wall-clock ceiling for one sweep. A serverless host kills the request at a
+# fixed limit with no chance to explain itself, so finish a few seconds early
+# and report which sources didn't make it. Unset (no limit) off serverless,
+# where a 60s sweep is fine. Keep this below the platform's own timeout —
+# vercel.json sets maxDuration to 300, so 270 leaves room to return.
+SWEEP_BUDGET = float(os.environ.get("WATCHTOWER_SWEEP_BUDGET",
+                                    "270" if SERVERLESS else "0")) or None
+
 app = FastAPI(title="watchtower", docs_url="/api/docs")
 
 
@@ -39,8 +61,59 @@ def config() -> dict:
     return yaml.safe_load((ROOT / "config.yaml").read_text(encoding="utf-8"))
 
 
+def data_path(relative) -> Path:
+    """Resolve a configured storage path against the writable data directory."""
+    p = Path(relative)
+    if p.is_absolute():
+        return p
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    return DATA_DIR / p
+
+
 def _sse(event: str, data: dict) -> str:
     return f"event: {event}\ndata: {json.dumps(data)}\n\n"
+
+
+# ------------------------------------------------------------------ auth
+
+WT_PASSWORD = os.environ.get("WATCHTOWER_PASSWORD", "")
+WT_USER = os.environ.get("WATCHTOWER_USER", "watchtower")
+
+
+@app.middleware("http")
+async def require_password(request, call_next):
+    """HTTP Basic, but only once the app is off localhost.
+
+    Locally this is a no-op, because `python run.py serve` binding to 127.0.0.1
+    with no password is the documented design and adding a login to it would be
+    friction for nothing.
+
+    On a public host it is the opposite: /api/sweep spends real money against
+    ANTHROPIC_API_KEY, so an unauthenticated public deployment is someone
+    else's budget to burn. With no password set we therefore fail *closed* and
+    serve 503 rather than quietly exposing it — a deployment that refuses to
+    work is recoverable, one that silently runs up a bill is not.
+    """
+    if not SERVERLESS:
+        return await call_next(request)
+
+    if not WT_PASSWORD:
+        return JSONResponse(
+            {"detail": "WATCHTOWER_PASSWORD is not set. Refusing to serve a "
+                       "public instance without authentication — /api/sweep "
+                       "spends real API credits. Set it in the host's "
+                       "environment variables and redeploy."},
+            status_code=503)
+
+    supplied = request.headers.get("authorization", "")
+    expected = "Basic " + base64.b64encode(
+        f"{WT_USER}:{WT_PASSWORD}".encode()).decode()
+    # Constant-time compare: a plain != leaks the password a byte at a time.
+    if not secrets.compare_digest(supplied, expected):
+        return JSONResponse(
+            {"detail": "authentication required"}, status_code=401,
+            headers={"WWW-Authenticate": 'Basic realm="watchtower"'})
+    return await call_next(request)
 
 
 # ------------------------------------------------------------------ meta
@@ -63,13 +136,14 @@ def list_sources():
             for n in BACKENDS
         ],
         "ai_available": enricher.enabled,
+        "ephemeral_storage": EPHEMERAL,
     }
 
 
 @app.get("/api/stats")
 def stats():
     cfg = config()
-    store = Store(ROOT / cfg["storage"]["database"])
+    store = Store(data_path(cfg["storage"]["database"]))
     try:
         return store.stats()
     finally:
@@ -119,7 +193,7 @@ def run_sweep(
             result = sweep(
                 q, fetcher, hours=hours, backends=backends, limit=limit,
                 fetch_bodies=fetch_bodies, enricher=enricher, max_enrich=max_ai,
-                progress=events.put,
+                budget=SWEEP_BUDGET, progress=events.put,
             )
             holder["result"] = result
         except Exception as e:
@@ -163,10 +237,10 @@ def run_sweep(
         }
 
         if result.items:
-            out_dir = ROOT / cfg["storage"].get("output_dir", "out")
+            out_dir = data_path(cfg["storage"].get("output_dir", "out"))
             payload["report"] = report.save(result, out_dir).name
             if save:
-                store = Store(ROOT / cfg["storage"]["database"])
+                store = Store(data_path(cfg["storage"]["database"]))
                 payload["saved"] = store.add(result.items)
                 store.close()
 
@@ -184,7 +258,7 @@ def run_sweep(
 @app.get("/api/archive")
 def archive(q: str = Query(..., min_length=1), limit: int = Query(30, le=100)):
     cfg = config()
-    store = Store(ROOT / cfg["storage"]["database"])
+    store = Store(data_path(cfg["storage"]["database"]))
     try:
         rows = store.search(q, limit=limit)
     except Exception as e:
@@ -204,7 +278,7 @@ def archive(q: str = Query(..., min_length=1), limit: int = Query(30, le=100)):
 @app.get("/api/report/{name}")
 def get_report(name: str):
     cfg = config()
-    out_dir = (ROOT / cfg["storage"].get("output_dir", "out")).resolve()
+    out_dir = data_path(cfg["storage"].get("output_dir", "out")).resolve()
     path = (out_dir / name).resolve()
     # Contain path traversal: the resolved path must stay inside out_dir.
     if not str(path).startswith(str(out_dir)) or not path.is_file():

@@ -13,8 +13,10 @@ to keyword-overlap ranking, but you still get results.
 from __future__ import annotations
 
 import re
+import time
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import TimeoutError as FuturesTimeout
 from dataclasses import dataclass, field
 
 from core.clean import extract, truncate
@@ -93,7 +95,7 @@ def _diversify(items: list[Item], cap_per_domain: int = 3) -> list[Item]:
 def sweep(query: str, fetcher: Fetcher, hours: int = 72,
           backends: list[str] | None = None, limit: int = 40,
           fetch_bodies: bool = True, enricher: Enricher | None = None,
-          max_enrich: int = 25, workers: int = 6,
+          max_enrich: int = 25, workers: int = 6, budget: float | None = None,
           progress=lambda event: None) -> SweepResult:
     """`progress` receives dicts, not strings, so callers can render them
     however they like: a CLI line, an SSE frame, a log record."""
@@ -101,6 +103,15 @@ def sweep(query: str, fetcher: Fetcher, hours: int = 72,
     backends = backends or DEFAULT_BACKENDS
     result = SweepResult(query=query)
     terms = _terms(query)
+
+    # `budget` exists for hosts that kill a request at a fixed wall clock —
+    # serverless, mostly. Running out of time is reported through the same
+    # `skipped` channel as a missing key, because it is the same fact: that
+    # source was not searched, and the result must not read as if it were.
+    deadline = (time.monotonic() + budget) if budget else None
+
+    def time_left() -> float:
+        return float("inf") if deadline is None else deadline - time.monotonic()
 
     # --- 1. fan out ---------------------------------------------------
     # Concurrent, not sequential: every backend is a different host, so there
@@ -121,10 +132,29 @@ def sweep(query: str, fetcher: Fetcher, hours: int = 72,
     def run_backend(name, fn):
         return name, fn(query, fetcher, hours=hours, limit=limit)
 
-    with ThreadPoolExecutor(max_workers=max(1, min(workers, len(runnable) or 1))) as pool:
+    # Not a `with` block: __exit__ calls shutdown(wait=True), which blocks until
+    # the slowest backend finishes and would make the budget cosmetic — we'd
+    # stop *waiting* on time and then get killed anyway. Shut down without
+    # waiting and let the straggler die with the process.
+    pool = ThreadPoolExecutor(max_workers=max(1, min(workers, len(runnable) or 1)))
+    try:
         futures = {pool.submit(run_backend, n, f): n for n, f in runnable}
-        for fut in as_completed(futures):
+        try:
+            # None, not inf: as_completed feeds this to Event.wait(), which
+            # overflows on an infinite timeout rather than waiting forever.
+            wait_for = None if deadline is None else max(0.0, time_left())
+            done_iter = list(as_completed(futures, timeout=wait_for))
+        except FuturesTimeout:
+            done_iter = [f for f in futures if f.done()]
+        for fut in futures:
             name = futures[fut]
+            if fut not in done_iter:
+                fut.cancel()
+                result.skipped[name] = "exceeded the sweep time budget"
+                result.per_source[name] = 0
+                progress({"type": "source", "name": name, "count": 0,
+                          "skipped": "exceeded the sweep time budget"})
+                continue
             try:
                 _, got = fut.result()
             except SourceSkipped as e:
@@ -143,6 +173,8 @@ def sweep(query: str, fetcher: Fetcher, hours: int = 72,
                 collected.extend(got)
                 result.per_source[name] = len(got)
                 progress({"type": "source", "name": name, "count": len(got)})
+    finally:
+        pool.shutdown(wait=False, cancel_futures=True)
 
     # Completion order is nondeterministic; reports should not be. Restore the
     # order the caller asked for.
@@ -169,6 +201,9 @@ def sweep(query: str, fetcher: Fetcher, hours: int = 72,
     needs_body = [i for i in deduped
                   if fetch_bodies and len(i.text) < 400
                   and i.source_type not in ("watchlist", "reference")]
+    if needs_body and time_left() <= 1.0:
+        result.skipped["article bodies"] = "exceeded the sweep time budget"
+        needs_body = []
     if needs_body:
         progress({"type": "stage", "stage": "fetch", "count": len(needs_body)})
 

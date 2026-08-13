@@ -54,6 +54,18 @@ async function init() {
     box.append(chip);
   });
 
+  // On a serverless host the archive lives in /tmp and does not survive between
+  // requests. Saying nothing would let someone tick "Keep results", see it
+  // succeed, and find an empty Archive tab later — a silent data loss.
+  if (data.ephemeral_storage) {
+    const keep = $("#keep");
+    keep.closest(".toggle").title =
+      "This deployment has no persistent disk — saved results are lost between requests.";
+    const note = el("p", "hint warn-note",
+      "Storage on this host is temporary: anything you keep is lost between requests.");
+    $("#sweep-form").append(note);
+  }
+
   if (!data.ai_available) {
     $("#use-ai").checked = false;
     $("#use-ai").disabled = true;

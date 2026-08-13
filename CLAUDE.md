@@ -189,6 +189,39 @@ and that a finished sweep does not silently re-run.
   circulars are usually PDFs. `pypdf` is already listed as an optional dep.
 - `config.yaml` ships with a placeholder regulator URL.
 
+## Deployment
+
+Designed to run locally (`python run.py serve`, bound to 127.0.0.1). It is also
+deployed to Vercel, which it does not naturally fit — three accommodations make
+that work, and all three are visible to the user rather than silent:
+
+- **Storage.** The deployment bundle is read-only, so `DATA_DIR` moves to
+  `/tmp/watchtower` when `VERCEL` is set. `/tmp` does not survive between
+  invocations, so the archive is ephemeral there. `/api/sources` returns
+  `ephemeral_storage: true` and the UI prints a warning, because "Keep results"
+  appearing to work and then losing the data is exactly the silent failure this
+  codebase exists to avoid. Set `WATCHTOWER_DATA_DIR` to a real mounted volume
+  to get persistence back.
+- **Auth.** Off localhost the app **fails closed**: with no
+  `WATCHTOWER_PASSWORD` set it serves 503 rather than exposing `/api/sweep`,
+  which spends real money against `ANTHROPIC_API_KEY`. With one set it requires
+  HTTP Basic, compared with `secrets.compare_digest`. Locally it stays
+  passwordless, which is the documented design.
+- **Time.** `sweep(budget=...)` bounds the wall clock; `SWEEP_BUDGET` defaults
+  to 270s under `vercel.json`'s 300s `maxDuration`. Sources that don't finish
+  are recorded in `result.skipped` as "exceeded the sweep time budget" — the
+  same channel as a missing key, because it is the same fact: not searched.
+  The executor is shut down with `wait=False`, otherwise `__exit__` blocks on
+  the slowest backend and the budget is cosmetic.
+
+Environment variables: `ANTHROPIC_API_KEY`, `OPENSANCTIONS_API_KEY`,
+`WATCHTOWER_PASSWORD`, `WATCHTOWER_USER` (default `watchtower`),
+`WATCHTOWER_DATA_DIR`, `WATCHTOWER_SWEEP_BUDGET`. Locally these come from
+`.env`, which `run.py` loads and `.gitignore` excludes.
+
+Scheduled mode cannot run on Vercel at all — it needs `adapters/`, which is
+missing, and a persistent database.
+
 ## Legal and ethical constraints
 
 Not boilerplate — these shape the design.

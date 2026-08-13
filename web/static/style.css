@@ -163,6 +163,15 @@ main { max-width: 1080px; margin: 0 auto; padding: 32px 24px 80px; }
 
 .hint { margin: 10px 0 0; font-size: 13px; color: var(--muted); }
 
+/* Deployment caveat, not a result. Coloured because it changes what the
+   numbers mean, which is the bar for colour in this palette. */
+.warn-note {
+  margin-top: 14px;
+  padding-left: 10px;
+  border-left: 2px solid var(--med);
+  color: var(--ink);
+}
+
 .controls {
   display: flex;
   flex-wrap: wrap;
