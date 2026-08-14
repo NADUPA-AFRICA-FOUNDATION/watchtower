@@ -50,6 +50,8 @@ python diagnose.py                           # why did every source return zero?
 
 # scamscan  (costs money per run — start with one topic)
 python scamscan.py hunt --config config.json --topics 1
+python scamscan.py hunt --topics 1 --dry-run   # queries only: no search, no cost
+python scamscan.py models                      # what this key can reach
 python scamscan.py queue --min-score 45
 python scamscan.py test "<text>" --url <url>   # offline scoring, no API calls
 python scamscan.py selftest                    # schema lint, tool version, lexicon audit
@@ -378,6 +380,21 @@ matching was survivable with invented terms and is not with real ones — `otp`
 inside "adoption", `reversal` inside "irreversible". `counter_terms` subtract
 before the clamp, because an advisory quotes the bait verbatim and would
 otherwise score like it. Bare-number entries still parse, so older configs work.
+
+**Gemini's free tier does not include Google Search grounding** (verified live;
+3.x is paid-only and the 2.5 models that had 500/day free now 404). Ungrounded
+calls on the same key work, so watchtower scoring is fine and only scamscan's
+`hunt` is blocked. `call_gemini` translates that specific 429 into a HuntError
+naming the cause, because "rate limited" would send someone off to wait for a
+quota that is never coming back. `hunt --dry-run` exists for this: expansion
+uses no search tool, so it runs free, and it sets `complete: false` and writes
+nothing so it can never read as a hunt that found nothing.
+
+**Gemini 3 bills thinking against `max_output_tokens`.** A budget sized for the
+output alone truncates the JSON mid-string — this broke expansion at 800 tokens
+until `thinking_budget=0` was set there (thinking buys nothing for "write three
+search queries"). `hunt` keeps thinking and takes 8000 instead. Anthropic counts
+output only, so this is a Gemini-path concern.
 
 Known gaps: the lexicon is Kenyan, so Tanzania and Lesotho are uncovered; the
 Sheng bucket is thin and `UNVERIFIED` because published reporting quotes English

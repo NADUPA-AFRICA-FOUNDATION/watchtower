@@ -226,7 +226,10 @@ class Enricher:
                         system_instruction=self.instructions,
                         response_mime_type="application/json",
                         response_json_schema=RECORD_SCHEMA,
-                        max_output_tokens=1024,
+                        # Thinking is billed against this budget on Gemini 3,
+                        # so 1024 (fine for Anthropic, which counts output
+                        # only) truncates the JSON and loses the item.
+                        max_output_tokens=4096,
                     ),
                 )
                 # Gemini 3 returns a thought_signature part beside the answer

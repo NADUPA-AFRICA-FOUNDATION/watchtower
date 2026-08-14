@@ -448,6 +448,37 @@ def main():
     ok &= check("a toolless call is not expected to be grounded",
                 grounding_failures(GResp([GCand()]), expected_search=False) == [])
 
+    print("\na dry run must never be mistaken for a hunt that found nothing")
+    client = FakeClient(Resp([Block("text", text='{"queries": ["a", "b"]}')]),
+                        text_resp({"findings": [FINDING]}))
+    con2 = db_connect(":memory:")
+    events = []
+    dry = hunt(client, CFG, con2, 1, events.append, dry_run=True)
+    kinds = [e["type"] for e in events]
+    ok &= check("it expands topics into queries", kinds.count("query") == 2)
+    ok &= check("but never searches", "finding" not in kinds)
+    ok &= check("only the expansion call is made", len(client.requests) == 1)
+    ok &= check("nothing is written to the database",
+                con2.execute("SELECT COUNT(*) FROM findings").fetchone()[0] == 0)
+    # The whole reason it is safe: complete=False means no caller can render
+    # this as "searched the brand, found nothing".
+    ok &= check("the run is not complete", dry["complete"] is False)
+    ok &= check("and says plainly that it was a dry run", dry["dry_run"] is True)
+    ok &= check("a real run still stores and completes",
+                hunt(FakeClient(Resp([Block("text", text='{"queries": ["a"]}')]),
+                                text_resp({"findings": [FINDING]})),
+                     CFG, db_connect(":memory:"), 1)["complete"] is True)
+    con2.close()
+
+    print("\nthinking tokens are billed against the output budget on gemini")
+    # Expansion asked for 800 tokens, Gemini 3 spent them thinking, and the
+    # JSON came back truncated mid-string. Thinking off is the fix, and the
+    # request has to actually carry it.
+    src = Path(__file__).parent.joinpath("scamscan.py").read_text()
+    ok &= check("expansion disables thinking", "thinking_budget=0" in src)
+    ok &= check("and hunt gives itself headroom instead",
+                "max_tokens=8000 if provider(cfg) == \"gemini\"" in src)
+
     print("\nthe suite pins a provider so it does not depend on local keys")
     ok &= check("pinned to anthropic for the deterministic sections",
                 provider({}) == "anthropic")

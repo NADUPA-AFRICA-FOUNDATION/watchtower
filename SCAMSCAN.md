@@ -27,6 +27,32 @@ python scamscan.py selftest              # free: config, schemas, lexicon
 python scamscan.py hunt --config config.json --topics 1   # start with one topic
 ```
 
+## Testing before you pay
+
+Verified on a live free-tier Gemini key: **Google Search grounding is not
+available on the Gemini free tier** for 3.x models, and the 2.5 models that had
+500 free grounded requests/day now 404 for new keys. So `hunt` needs billing —
+but three of the four things worth testing do not.
+
+| What you want to check | Free? | How |
+|---|---|---|
+| Scoring quality — the thing that sets analyst workload | yes, entirely local | `scamscan.py test "<copy>" --url <url>`, or the **Score** tab |
+| Lexicon, counter terms, thresholds | yes | same; every hit shows its source |
+| Config, provider, schemas, model IDs | yes | `scamscan.py selftest`, `scamscan.py models` |
+| The queries the model will actually run | yes — expansion uses no search tool | `scamscan.py hunt --topics 1 --dry-run` |
+| Extraction from live pages | **no** | needs grounding |
+
+Do the first four first. Scoring is where the quality lives, it is deterministic,
+and it costs nothing to iterate on — a hunt only decides *which pages* reach it.
+
+When you do move to paid, note that Gemini's **paid** tier includes 5,000 free
+grounded searches per month across 3.x models before per-request billing starts,
+and `--topics 1` is about 12 searches. Adding billing is not the same as
+spending; it is what unlocks the allowance.
+
+A dry run never writes to the database and reports `complete: false`, so it can
+never be mistaken for a hunt that searched and found nothing.
+
 **The provider changes the failure shape, not the pipeline.** Anthropic reports
 a failed search as an error object inside a 200; Gemini answers anyway from the
 model's own memory and the only evidence is negative — no grounding metadata.
@@ -42,6 +68,8 @@ stops the run and says so, a per-minute limit is retried with backoff.
 | Command | What it does |
 |---|---|
 | `hunt` | Expand seed topics into queries, search, extract, score, store |
+| `hunt --dry-run` | Expand into queries and stop. No search, no cost, no writes — works on a Gemini free key |
+| `models` | List the models this API key can actually reach |
 | `queue` | Print the review queue, highest score first |
 | `export --out queue.csv` | Dump everything to CSV |
 | `dispose <fingerprint> confirmed\|false_positive\|unclear\|escalated` | Record an analyst verdict |

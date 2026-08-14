@@ -674,8 +674,18 @@ def gemini_text(resp):
     return "".join(out)
 
 
-def call_gemini(client, model, prompt, tools=None, max_tokens=4000, schema=None):
+def call_gemini(client, model, prompt, tools=None, max_tokens=4000, schema=None,
+                thinking_budget=None):
     config = {"max_output_tokens": max_tokens}
+    if thinking_budget is not None:
+        # Gemini 3 spends max_output_tokens on thinking BEFORE it writes the
+        # answer, so a budget sized for the output alone truncates the JSON
+        # mid-string. Expansion is "write three search queries" — thinking buys
+        # nothing there and was the difference between a parse error and 116
+        # output tokens. Judging whether a page is a scam is not that, so hunt
+        # leaves the model default alone.
+        config["thinking_config"] = genai_types.ThinkingConfig(
+            thinking_budget=thinking_budget)
     if tools:
         config["tools"] = tools
     if schema:
@@ -774,14 +784,18 @@ def parse_payload(text, key, strict):
     return parse_json_array(text)
 
 
-def _ask(client, cfg, model, prompt, key, schema, state, tools=None, max_tokens=4000):
+def _ask(client, cfg, model, prompt, key, schema, state, tools=None,
+         max_tokens=4000, thinking_budget=None):
     """One call, structured if the API allows it, with a visible downgrade if not."""
     call = call_gemini if provider(cfg) == "gemini" else call_claude
     use_schema = cfg["search"].get("structured_outputs", True) and not state.structured_disabled
     if use_schema:
         try:
             text, resp = call(client, model, prompt, tools=tools,
-                              max_tokens=max_tokens, schema=schema)
+                              max_tokens=max_tokens, schema=schema,
+                              **({"thinking_budget": thinking_budget}
+                                 if call is call_gemini and thinking_budget is not None
+                                 else {}))
             return text, resp, True
         except Exception as e:
             if not structured_rejected(e):
@@ -792,7 +806,10 @@ def _ask(client, cfg, model, prompt, key, schema, state, tools=None, max_tokens=
             print(f"      reason: {state.structured_disabled}")
 
     text, resp = call(client, model, prompt + JSON_MODE_SUFFIX.format(key=key),
-                      tools=tools, max_tokens=max_tokens)
+                      tools=tools, max_tokens=max_tokens,
+                      **({"thinking_budget": thinking_budget}
+                         if call is call_gemini and thinking_budget is not None
+                         else {}))
     return text, resp, False
 
 
@@ -820,8 +837,8 @@ def expand_queries(client, cfg, topic, state=None):
     )
     model = (model_for(cfg) if provider(cfg) == "gemini"
              else cfg["search"]["expansion_model"])
-    text, _, strict = _ask(client, cfg, model, prompt,
-                           "queries", QUERIES_SCHEMA, state, max_tokens=800)
+    text, _, strict = _ask(client, cfg, model, prompt, "queries", QUERIES_SCHEMA,
+                           state, max_tokens=800, thinking_budget=0)
     queries = [q for q in parse_payload(text, "queries", strict) if isinstance(q, str)]
     if not queries:
         # Expansion has no web search, so there is no legitimate way for it to
@@ -839,7 +856,8 @@ def hunt_query(client, cfg, query, state=None, progress=None):
     prompt = HUNT_PROMPT.format(brand=cfg["brand"]["name"], query=query,
                                 scam_types=", ".join(SCAM_TYPES))
     text, resp, strict = _ask(client, cfg, model_for(cfg), prompt, "findings",
-                              FINDINGS_SCHEMA, state, tools=[tool])
+                              FINDINGS_SCHEMA, state, tools=[tool],
+                              max_tokens=8000 if provider(cfg) == "gemini" else 4000)
 
     # Order matters: check why the turn ended before trusting what it produced.
     stop = getattr(resp, "stop_reason", None)
@@ -876,12 +894,19 @@ def hunt_query(client, cfg, query, state=None, progress=None):
 # --------------------------------------------------------------------------
 
 
-def hunt(client, cfg, con, topics=None, progress=None, state=None):
+def hunt(client, cfg, con, topics=None, progress=None, state=None, dry_run=False):
     """One discovery pass. Returns a summary; reports as it goes via progress().
 
     progress(dict) is the same contract as watchtower's sweep(): the CLI renders
     the dicts as lines, the web layer forwards them as SSE frames, and neither
     owns the format. Add a field rather than changing an existing one.
+
+    dry_run expands the topics into queries and stops before searching. Query
+    expansion uses no search tool, so it runs on a Gemini free-tier key where
+    the grounded leg does not — which makes it the cheap way to check the
+    config, the provider wiring and the queries themselves before paying for a
+    single search. It never touches the database, and `complete` is false, so a
+    dry run can never be mistaken for a hunt that found nothing.
     """
     progress = progress or (lambda e: None)
     state = state or RunState()
@@ -892,7 +917,7 @@ def hunt(client, cfg, con, topics=None, progress=None, state=None):
                "topics": len(seeds), "tool": tool_note,
                "model": model_for(cfg), "provider": provider(cfg),
                "structured": bool(cfg["search"].get("structured_outputs", True)),
-               "escalated": 0}
+               "escalated": 0, "dry_run": bool(dry_run)}
     progress({"type": "start", **summary})
 
     for topic in seeds:
@@ -908,6 +933,8 @@ def hunt(client, cfg, con, topics=None, progress=None, state=None):
 
         for q in queries:
             progress({"type": "query", "query": q})
+            if dry_run:
+                continue
             try:
                 findings = hunt_query(client, cfg, q, state, progress)
             except HuntError as e:
@@ -940,7 +967,10 @@ def hunt(client, cfg, con, topics=None, progress=None, state=None):
     summary["structured_disabled"] = state.structured_disabled
     # An empty queue is a claim about the brand. Only make it when the searches
     # actually ran, so the caller can tell the two apart without re-deriving it.
-    summary["complete"] = not summary["failures"] and summary["queries_run"] > 0
+    # A dry run searched nothing at all, so it is never complete — that is the
+    # whole reason it is safe to run.
+    summary["complete"] = (not dry_run and not summary["failures"]
+                           and summary["queries_run"] > 0)
     progress({"type": "done", **summary})
     return summary
 
@@ -978,8 +1008,13 @@ def cmd_hunt(args):
             print(f"    {flag}{'!!' if e['escalate'] else '  '} "
                   f"{e['score']:>5.1f}  {e['url'][:70]}")
 
-    summary = hunt(client, cfg, con, args.topics, render)
+    summary = hunt(client, cfg, con, args.topics, render, dry_run=args.dry_run)
 
+    if summary["dry_run"]:
+        print(f"\nDRY RUN — expanded {summary['topics']} topic(s) into queries and "
+              f"stopped.\n   Nothing was searched, nothing was stored, and this says "
+              f"nothing about\n   the brand. Drop --dry-run to search for real.")
+        return
     print(f"\n{summary['seen']} findings processed, {summary['new']} new. "
           f"Stored in {args.db}")
 
@@ -1192,6 +1227,9 @@ def main():
     h = sub.add_parser("hunt", help="run a discovery pass")
     h.add_argument("--config", default="config.json")
     h.add_argument("--topics", type=int, help="limit number of seed topics")
+    h.add_argument("--dry-run", action="store_true",
+                   help="expand topics into queries and stop — no search, no cost, "
+                        "and it works on a Gemini free-tier key")
     h.set_defaults(func=cmd_hunt)
 
     q = sub.add_parser("queue", help="show the review queue")
