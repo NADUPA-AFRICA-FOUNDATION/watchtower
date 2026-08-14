@@ -410,6 +410,11 @@ def main():
     ok &= check("an unsearched lane is labelled too", 'd.skipped ? "off"' in js)
     ok &= check("chips gate on the key being present, not on being a default",
                 "s.available !== false" in js)
+    # The label said "Score with Claude" while a Gemini key was driving it.
+    ok &= check("the scoring toggle names the provider actually in use",
+                'id="ai-label"' in html and "data.ai_provider" in js)
+    ok &= check("and /api/sources reports which one that is",
+                "ai_provider" in client.get("/api/sources").json())
     for cls in (".lane.skipped", ".summary .warn"):
         ok &= check(f"{cls} is styled", cls in css)
 

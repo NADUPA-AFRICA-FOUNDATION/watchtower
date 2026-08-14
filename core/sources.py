@@ -617,6 +617,27 @@ BACKENDS = {
     "opensanctions": opensanctions,
 }
 
+# Which backends need credentials, and the variable each one wants. One map,
+# because there are three consumers — `run.py sources`, /api/sources for the
+# chip gating, and diagnose.py — and when this lived in two of them the CLI
+# went on claiming opensanctions was the only key-gated source long after five
+# more had been added.
+BACKEND_KEYS = {
+    "opensanctions": "OPENSANCTIONS_API_KEY",
+    "web_search": "BRAVE_API_KEY",
+    "opencorporates": "OPENCORPORATES_API_KEY",
+    "x": "X_BEARER_TOKEN",
+    "reddit": "REDDIT_CLIENT_ID",
+    "bluesky": "BLUESKY_APP_PASSWORD",
+}
+
+
+def has_credentials(name: str) -> bool:
+    """True when this backend either needs no key or has the one it needs."""
+    var = BACKEND_KEYS.get(name)
+    return not var or bool(os.environ.get(var))
+
+
 # Key-gated backends stay in the defaults: they now disable themselves in the
 # UI when the key is absent, and raise SourceSkipped rather than a silent zero
 # on the CLI, so including them costs nothing and forgetting a key is visible.

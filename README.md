@@ -2,8 +2,8 @@
 
 > This repo holds two tools behind one page. **watchtower** (this file) sweeps
 > many sources for a keyword — the **Sweep** and **Archive** tabs. **scamscan**
-> ([SCAMSCAN.md](SCAMSCAN.md)) hunts live scam pages with Claude's server-side
-> web search — the **Queue** and **Score** tabs. They share the UI and nothing
+> ([SCAMSCAN.md](SCAMSCAN.md)) hunts live scam pages with server-side web
+> search — the **Queue** and **Score** tabs. They share the UI and nothing
 > below it: separate configs, separate databases, neither imports the other.
 
 Type a keyword, get ranked findings across news, regulatory sources, social and
@@ -19,7 +19,7 @@ python run.py sweep "beneficial ownership Kenya" --hours 168    # or CLI
 ```bash
 bash setup.sh              # creates .venv, installs deps, runs all tests
 source .venv/bin/activate
-export ANTHROPIC_API_KEY=sk-...    # optional
+export GEMINI_API_KEY=...          # optional; free tier at aistudio.google.com
 python run.py serve
 ```
 
@@ -28,30 +28,40 @@ no API key required to get results.
 
 ## The web UI
 
-A sweep takes 30-60 seconds, so nothing blocks: results stream over SSE and each
-source fills its lane as it reports in. Two views — **Sweep** for live queries,
-**Archive** for full-text search over anything you've saved.
+A sweep takes a while, so nothing blocks: results stream over SSE and each
+source fills its lane as it reports in. Four views — **Sweep** and **Archive**
+on the watchtower side, **Queue** and **Score** on the scamscan side.
+
+Budget 30-60s without model scoring. With it, expect longer: scoring is one
+call per candidate and a free-tier Gemini key is rate limited per minute, so a
+25-item `--max-ai` pass can add several minutes. Lower `--max-ai` if you want it
+snappier — the keyword prefilter already ranks everything, so the model is only
+re-ordering the top of the list.
 
 Controls map to the CLI flags: lookback window, which sources to hit, whether to
-read full article bodies, whether to score with Claude. Options that need a key
+read full article bodies, whether to score with a model. Options that need a key
 you haven't set are disabled with a tooltip saying which one.
 
 ```bash
 python run.py serve --host 0.0.0.0 --port 9000
 ```
 
-It binds to localhost by default. There is no authentication — put it behind a
-reverse proxy with auth before exposing it to anything.
+It binds to localhost by default and there is no authentication there. Off
+localhost it **fails closed**: with no `WATCHTOWER_PASSWORD` set it serves 503
+rather than exposing endpoints that spend API credits and a review queue holding
+personal data.
 
 That's it. No config needed for sweeps, no API key required to get results.
 Without a key you lose relevance scoring, summaries and entity extraction, and
-fall back to keyword-overlap ranking.
+fall back to keyword-overlap ranking. Scoring runs on **Gemini or Anthropic** —
+whichever key is set, Gemini first because it has a free tier. `python run.py
+models` lists what your key can reach.
 
 ## What a sweep does
 
 ```
 fan out across sources -> dedupe -> fetch bodies -> clean
-    -> keyword prefilter -> Claude scores the survivors -> rank -> report
+    -> keyword prefilter -> the model scores the survivors -> rank -> report
 ```
 
 Results print to the terminal; a full markdown report lands in `out/`.
@@ -63,8 +73,17 @@ Results print to the terminal; a full markdown report lands in `out/`.
 | `wikipedia` | entity background, disambiguation | no |
 | `hackernews` | tech and fintech chatter | no |
 | `mastodon` | public social posts | no |
-| `opensanctions` | sanctions, PEP and watchlist matches | free key |
+| `gleif` | legal entity identifiers, corporate structure | no |
 | `sec_edgar` | US filings full-text | no |
+| `web_search` | broad web via Brave | `BRAVE_API_KEY` |
+| `opensanctions` | sanctions, PEP and watchlist matches | `OPENSANCTIONS_API_KEY` |
+| `opencorporates` | company registry records | `OPENCORPORATES_API_KEY` |
+| `bluesky` | public posts via the official API | `BLUESKY_HANDLE` + `BLUESKY_APP_PASSWORD` |
+| `reddit` | subreddit search via the official API | `REDDIT_CLIENT_ID` + `_SECRET` |
+| `x` | posts via X's official paid API | `X_BEARER_TOKEN` |
+
+`python run.py sources` prints this list with the keys you actually have set,
+and marks the ones that will skip themselves.
 
 ```bash
 python run.py sources                                     # list them
@@ -94,8 +113,19 @@ python run.py stats
 `.github/workflows/monitor.yml` runs this twice daily on a free GitHub runner
 and commits results back to the repo. That's the whole deployment — no server.
 
-Adapters for scheduled mode: `rss` (start here), `gdelt`, `webpage` (link-diff
-on regulator listing pages, survives redesigns), `social` (Reddit via PRAW).
+Adapters for scheduled mode, all in `adapters/`:
+
+| Adapter | What it watches | Notes |
+|---|---|---|
+| `rss` | any feed | start here — cheapest source that exists |
+| `gdelt` | standing GDELT queries | takes GDELT's own `timespan` |
+| `webpage` | listing pages with no feed | link differ, survives redesigns; reads PDFs |
+| `social` | subreddits via the official API | enforces `RETENTION_DAYS` on every run |
+
+Each consults `store.is_seen()`, so a poll that finds nothing new is cheap.
+Unlike sweep sources they never raise on an ordinary failure: a scheduled run is
+unattended, and one dead feed at 03:00 must not stop the other eleven.
+
 Point `rss` at a self-hosted [RSSHub](https://github.com/DIYgod/RSSHub) and a
 lot of feed-less sites become feeds.
 
@@ -110,11 +140,12 @@ candidates reach the model. That's what keeps a sweep cheap.
 **Source diversity cap.** Three results per domain up top, so wire copy can't
 occupy your entire first page.
 
-**Claude sits in scoring only** — not in fetching, and not in parsing HTML where
-a CSS selector works. Cost controls already in the code: text is cleaned and
-truncated first, the instruction block is marked for prompt caching, Haiku
-triages and only items above `escalate_above` get a Sonnet pass, and tool use
-forces valid JSON so nothing regex-parses model prose.
+**The model sits in scoring only** — not in fetching, and not in parsing HTML
+where a CSS selector works. Cost controls already in the code: text is cleaned
+and truncated first, the instructions stay byte-identical across a run so the
+prompt cache holds, a cheap model triages and only items above `escalate_above`
+get a deeper pass, and the JSON shape is enforced by the API so nothing
+regex-parses model prose.
 
 **robots.txt goes through the same client as everything else.** urllib's
 `RobotFileParser.read()` opens its own connection, ignores your user agent and
@@ -125,36 +156,44 @@ it.
 ## Tests
 
 ```bash
-python smoke_test.py        # store, dedupe, FTS5, alert triggers      (21)
-python sweep_test.py        # backend parsers, dedupe, concurrent      (31)
-                            # fetch, ranking, both renderers
-python web_test.py          # endpoints, SSE contract, validation,     (33)
-                            # path traversal, frontend wiring
+python smoke_test.py        # store, dedupe, FTS5, alerts, adapters, retention
+python sweep_test.py        # backend parsers, dedupe, concurrent fetch,
+                            # ranking, both renderers
+python web_test.py          # endpoints, SSE contract, validation,
+                            # path traversal, frontend wiring, both UI sides
+python scamscan_test.py     # scamscan: scoring, lexicon, schemas, silent zeros
 ```
+
+Each suite prints its own total. They need no network and no API key — verified
+by running them with `.env` moved aside.
 
 Both `sweep_test.py` and `web_test.py` inject an `httpx.MockTransport`, so only
 the network is replaced — the code under test is the real thing, including the
 FastAPI app and the SSE stream. If they pass but a live sweep returns nothing,
 the problem is the remote API or your connection, not the install.
 
-The web UI has now been rendered and checked in Chrome at 1440, 820 and 380px,
-including the empty, connection-lost and no-source-selected states. Not covered:
-scheduled mode, which cannot run until the missing `adapters/` modules exist.
+The web UI has been rendered and checked in Chrome at 1440, 820 and 380px,
+including the empty, connection-lost and no-source-selected states, and both the
+watchtower and scamscan sides. Scheduled mode is covered too: `smoke_test.py`
+exercises all four adapters against a mock transport, including the retention
+purge and its removal from the FTS index.
 
 ## Before you point it at anything
 
 - `obey_robots: true` stays on. It's the line between automated collection and
   unauthorised access if anyone ever asks.
 - Rate limiting is per domain, not global, and thread-safe.
-- Put a real contact address in `user_agent`. Site owners who can reach you will
-  email before they block you.
+- Put a real contact address in `WATCHTOWER_CONTACT` in `.env`. `config.yaml`
+  interpolates it into the user agent, so a reachable address gets sent without
+  being committed. SEC EDGAR answers 403 without one.
 - Social posts are personal data. Under Kenya's Data Protection Act 2019 you
   need a lawful basis, a stated purpose and a retention limit. `RETENTION_DAYS`
   in `adapters/social.py` is enforced on every scheduled run.
-- Instagram, TikTok, LinkedIn and X are absent on purpose. They prohibit
+- Instagram, TikTok, LinkedIn and Facebook are absent on purpose. They prohibit
   scraping and fail *silently*, which is the worst failure mode for monitoring:
-  you believe you have coverage and you don't. Mastodon is here because it has
-  an open public API.
+  you believe you have coverage and you don't. The line is the interface, not
+  the brand: X, Reddit and Bluesky are here because each publishes a documented
+  API that fails loudly, and Mastodon because its API is open.
 - Sweeping a named private individual is a different activity from sweeping a
   topic or a company, legally and ethically. Know which one you're doing.
 

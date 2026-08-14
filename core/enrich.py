@@ -1,12 +1,24 @@
-"""Where Claude earns its keep: messy prose in, typed records out.
+"""The scoring layer: messy prose in, typed records out.
+
+Runs on Gemini or Anthropic, picked by whichever key is set (see
+`available_provider`). Everything below is true of both paths.
 
 Cost discipline baked in:
   - Text is already cleaned and truncated before it gets here.
-  - The instruction block is marked for prompt caching, so the schema and
-    watchlist aren't re-billed on every one of a thousand articles.
-  - Haiku triages everything; only items scoring above `escalate_above` get a
-    second, deeper pass from Sonnet. On a typical news feed that's under 10%.
-  - Tool use forces valid JSON, so there's no regex-parsing of prose.
+  - The instructions are constant across every item in a run, and `focus` goes
+    in the user turn rather than the system block, so the cached prefix stays
+    identical — explicit `cache_control` on Anthropic, implicit caching on
+    Gemini. Either way the schema and watchlist aren't re-billed per article.
+  - A cheap model triages everything; only items scoring above `escalate_above`
+    get a second, deeper pass. On a typical news feed that's under 10%.
+  - The JSON shape is enforced by the API — a forced tool call on Anthropic,
+    `response_json_schema` on Gemini — so nothing regex-parses model prose.
+
+Two provider differences that bite:
+  - Gemini bills *thinking* against `max_output_tokens`, so budgets here are
+    sized for thinking plus output, not output alone.
+  - 503 UNAVAILABLE is common and transient. It is retried; without that, one
+    blip drops an item to its keyword score and quietly reorders the results.
 """
 
 from __future__ import annotations
@@ -59,8 +71,9 @@ GEMINI_DEEP_MODEL = os.environ.get("GEMINI_DEEP_MODEL", "gemini-3.7-flash")
 
 # Free-tier Gemini keys are rate limited per minute, and a sweep enriches up to
 # --max-ai items back to back. Without a retry the tail of every sweep would
-# come back unscored and look like a run of irrelevant articles.
-RATE_LIMIT_RETRIES = 3
+# come back unscored and look like a run of irrelevant articles. 503 "high
+# demand" is the other common one and is not a rate limit — see _is_transient.
+RATE_LIMIT_RETRIES = 4
 
 
 def available_provider(explicit: str = "") -> str:
@@ -179,9 +192,22 @@ def _fatal_reason(exc) -> str | None:
     return None
 
 
-def _is_rate_limit(exc) -> bool:
+def _is_transient(exc) -> bool:
+    """Worth trying again in a moment, as opposed to worth giving up on.
+
+    503 UNAVAILABLE ("this model is currently experiencing high demand") is the
+    one that matters and it is not a rate limit. It was costing whole items:
+    the single most on-topic article in a live sweep took one 503, fell back to
+    its keyword score, and ranked below an off-topic story that happened to
+    answer on the first try. The run said so in `errors`, so it was not silent
+    — but a transient blip should not decide the ranking.
+    """
     status = getattr(exc, "status_code", None) or getattr(exc, "code", None)
-    return status == 429 or "resource_exhausted" in str(exc).lower()
+    msg = str(exc).lower()
+    return (status in (429, 500, 502, 503, 504)
+            or "resource_exhausted" in msg
+            or "unavailable" in msg
+            or "internal error" in msg)
 
 
 class Enricher:
@@ -242,7 +268,7 @@ class Enricher:
                 return json.loads(text)
             except Exception as e:
                 last = e
-                if not _is_rate_limit(e) or _fatal_reason(e):
+                if not _is_transient(e) or _fatal_reason(e):
                     raise
                 # Jittered, so 25 candidates in one sweep don't all wake up
                 # together and hit the per-minute limit again as a block.
@@ -337,13 +363,24 @@ def digest(items: list[dict], api_key: str | None = None,
         for i in items
     ]
 
+    try:
+        return _digest_call(which, lines, api_key)
+    except Exception as e:
+        # The alert list is the deliverable; this narrative brief is a garnish
+        # on top of it. Letting a transient 503 here abort `run.py alert` means
+        # a scheduled run produces no digest file at all and the watchlist hits
+        # go unrecorded — losing the alert to save the prose.
+        return f"(digest unavailable: {type(e).__name__}: {str(e)[:200]})"
+
+
+def _digest_call(which: str, lines: list[str], api_key: str | None) -> str:
     if which == "gemini":
         client = genai.Client(api_key=api_key or os.environ.get("GEMINI_API_KEY"))
         resp = client.models.generate_content(
             model=GEMINI_DEEP_MODEL,
             contents="\n".join(lines),
             config=genai_types.GenerateContentConfig(
-                system_instruction=BRIEF_INSTRUCTION, max_output_tokens=1500),
+                system_instruction=BRIEF_INSTRUCTION, max_output_tokens=4096),
         )
         return resp.text or ""
 

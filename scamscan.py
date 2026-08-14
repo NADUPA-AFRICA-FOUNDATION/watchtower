@@ -1,16 +1,22 @@
 """
-scamscan - keyword-driven scam discovery using Claude's server-side web search.
+scamscan - keyword-driven scam discovery using server-side web search.
 
 Pipeline:
-  seed topics -> query expansion (Claude) -> web search + structured extraction
-  (Claude) -> local artifact extraction -> local scoring -> dedupe -> SQLite queue
+  seed topics -> query expansion (model) -> web search + structured extraction
+  (model) -> local artifact extraction -> local scoring -> dedupe -> SQLite queue
+
+Note: Gemini's free tier does not include search grounding, so `hunt` needs
+Anthropic or a billed Gemini key. Everything else here runs free — see
+`hunt --dry-run` and `test`.
 
 The model proposes; local code decides. Scores that drive analyst workload are
 computed here, in code you can audit, not inside a prompt.
 
 Usage:
-  export ANTHROPIC_API_KEY=sk-ant-...
-  python scamscan.py hunt --config config.json
+  export GEMINI_API_KEY=...          # or ANTHROPIC_API_KEY; .env is read too
+  python scamscan.py selftest        # free: config, schemas, lexicon
+  python scamscan.py hunt --config config.json --topics 1 --dry-run
+  python scamscan.py hunt --config config.json --topics 1
   python scamscan.py queue --min-score 45
   python scamscan.py export --out queue.csv
 """
@@ -22,9 +28,11 @@ import hashlib
 import json
 import logging
 import os
+import random
 import re
 import sqlite3
 import sys
+import time
 import unicodedata
 from datetime import datetime, timezone
 
@@ -694,11 +702,25 @@ def call_gemini(client, model, prompt, tools=None, max_tokens=4000, schema=None,
         # combination itself — _ask still watches for a rejection.
         config["response_mime_type"] = "application/json"
         config["response_json_schema"] = schema
-    try:
-        resp = client.models.generate_content(
-            model=model, contents=prompt,
-            config=genai_types.GenerateContentConfig(**config))
-    except Exception as e:
+    resp = None
+    last = None
+    for attempt in range(3):
+        try:
+            resp = client.models.generate_content(
+                model=model, contents=prompt,
+                config=genai_types.GenerateContentConfig(**config))
+            break
+        except Exception as e:
+            last = e
+            # 503 "high demand" is transient and not a quota problem. Without a
+            # retry it turns a query into a failed query, and for this tool a
+            # query that did not run is the expensive kind of wrong.
+            if _is_transient(e) and not _is_quota_error(e) and attempt < 2:
+                time.sleep((2 ** attempt) + random.uniform(0, 1))
+                continue
+            break
+    if resp is None:
+        e = last
         if tools and _is_quota_error(e):
             # Verified against a live free-tier key: grounding is billed
             # separately from tokens and is simply not on the free tier for
@@ -713,13 +735,21 @@ def call_gemini(client, model, prompt, tools=None, max_tokens=4000, schema=None,
                 "scoring is unaffected — but scamscan cannot search. Use "
                 "SCAMSCAN_PROVIDER=anthropic, or enable billing on the Gemini "
                 "key.") from e
-        raise
+        raise e
     return gemini_text(resp), resp
 
 
 def _is_quota_error(exc):
     status = getattr(exc, "status_code", None) or getattr(exc, "code", None)
     return status == 429 or "resource_exhausted" in str(exc).lower()
+
+
+def _is_transient(exc):
+    """Retryable: a blip, not a verdict. Mirrors core/enrich.py::_is_transient."""
+    status = getattr(exc, "status_code", None) or getattr(exc, "code", None)
+    msg = str(exc).lower()
+    return (status in (429, 500, 502, 503, 504) or "resource_exhausted" in msg
+            or "unavailable" in msg or "internal error" in msg)
 
 
 def call_claude(client, model, prompt, tools=None, max_tokens=4000, schema=None):

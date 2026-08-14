@@ -66,14 +66,21 @@ async function init() {
     $("#sweep-form").append(note);
   }
 
+  // Name the provider actually in use. The label said "Score with Claude" long
+  // after a Gemini key would drive it, which is the kind of drift that makes
+  // someone doubt what the rest of the page is telling them.
+  const provider = { gemini: "Gemini", anthropic: "Claude" }[data.ai_provider];
   if (!data.ai_available) {
     $("#use-ai").checked = false;
     $("#use-ai").disabled = true;
     $("#use-ai").closest(".toggle").title =
-      "Set ANTHROPIC_API_KEY to enable relevance scoring";
+      "Set GEMINI_API_KEY (free tier) or ANTHROPIC_API_KEY to enable scoring";
+    $("#ai-label").textContent = "Score with a model";
     $("#ai-status").textContent = "keyword ranking";
   } else {
-    $("#ai-status").textContent = "scoring ready";
+    $("#ai-label").textContent = `Score with ${provider || "a model"}`;
+    $("#ai-status").textContent = provider
+      ? `scoring ready — ${provider}` : "scoring ready";
   }
 }
 

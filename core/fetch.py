@@ -32,10 +32,16 @@ class FetchResult:
     status: int
     html: str = ""
     error: str = ""
+    # Raw bytes and the declared type, for responses that are not text at all.
+    # Regulator circulars are overwhelmingly PDFs, and decoding one into `html`
+    # produces non-empty mojibake — which would satisfy the old `ok` check and
+    # travel down the pipeline looking like an article body.
+    content: bytes = b""
+    content_type: str = ""
 
     @property
     def ok(self) -> bool:
-        return self.status == 200 and bool(self.html)
+        return self.status == 200 and bool(self.html or self.content)
 
 
 class Fetcher:
@@ -174,7 +180,18 @@ class Fetcher:
 
             if r.status_code != 200:
                 return FetchResult(url, r.status_code, error=f"HTTP {r.status_code}")
-            return FetchResult(url, 200, html=r.text)
+            ctype = (r.headers.get("content-type") or "").split(";")[0].strip()
+            # Only decode to text when it plausibly is text. A PDF or an image
+            # keeps its bytes and leaves `html` empty, so nothing downstream
+            # mistakes a binary blob for an article.
+            textual = (not ctype
+                       or ctype.startswith("text/")
+                       or ctype in ("application/json", "application/xml",
+                                    "application/rss+xml", "application/atom+xml",
+                                    "application/xhtml+xml", "application/javascript"))
+            return FetchResult(url, 200,
+                               html=r.text if textual else "",
+                               content=r.content, content_type=ctype)
 
         return FetchResult(url, 0, error="exhausted retries")
 

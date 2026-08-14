@@ -55,6 +55,16 @@ CREATE TRIGGER IF NOT EXISTS items_au AFTER UPDATE ON items BEGIN
     VALUES (new.rowid, new.title, new.text, new.entities);
 END;
 
+-- Without this, a deleted row leaves its title and body in the FTS index and
+-- stays findable through `run.py search`. That is a correctness bug for any
+-- delete, and a compliance one for the retention purge in adapters/social.py:
+-- the point of RETENTION_DAYS is that someone's post is actually gone, not
+-- that one of the two places holding it forgot about it.
+CREATE TRIGGER IF NOT EXISTS items_ad AFTER DELETE ON items BEGIN
+    INSERT INTO items_fts(items_fts, rowid, title, text, entities)
+    VALUES('delete', old.rowid, old.title, old.text, old.entities);
+END;
+
 -- Tracks what each adapter has already seen, so re-runs are cheap.
 CREATE TABLE IF NOT EXISTS seen_urls (
     url        TEXT PRIMARY KEY,

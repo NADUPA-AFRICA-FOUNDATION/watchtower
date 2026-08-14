@@ -86,7 +86,10 @@ core/
   enrich.py    Claude scoring and summarisation
   report.py    terminal + markdown renderers, CLI progress formatting
   alerts.py    watchlist matching for scheduled mode
-adapters/      rss, gdelt, webpage, social — for scheduled mode
+adapters/      scheduled-mode collectors: rss, gdelt, webpage, social.
+               Stateful (they consult store.is_seen) and they never raise on an
+               ordinary failure — a scheduled run is unattended, so one dead
+               feed must not stop the others. The inverse of sources.py.
 web/
   app.py       FastAPI, SSE streaming
   static/      index.html, style.css, app.js — no build step, no framework
@@ -272,23 +275,18 @@ ramp: --weak #97A6B0  --low #46748F  --med #B5741A  --high #A82C22
 type: IBM Plex Mono (display, labels, all numerics) + IBM Plex Sans (body)
 ```
 
+Sweep timing: 30-60s without scoring. With it, one model call per candidate and
+a free-tier Gemini key rate limited per minute means a 25-item pass can run
+several minutes. That is why the trace exists and why `SWEEP_BUDGET` matters on
+serverless.
+
 Signature element is the sweep trace: source lanes that fill live as each
 backend reports in. Don't replace it with a generic spinner — a sweep takes
 30-60s and the lanes are what make a silent zero-hit source visible.
 
 ## Known gaps
 
-- **The `adapters/` package is missing.** `rss.py`, `gdelt.py`, `webpage.py`
-  and `social.py` are not in the tree, so `run.py collect|enrich|alert|run`
-  cannot work. `run.py` imports them inside `cmd_collect` rather than at module
-  scope so that `serve` and `sweep` — which share none of that code — still
-  start. Scheduled mode is dead until those four modules are written.
-- **`config.yaml` still ships the placeholder contact `you@example.com`.**
-  Wikipedia and SEC EDGAR both want a real contact in the user agent, and a 403
-  from EDGAR is usually this. Put a real address in before running anything
-  sustained.
-- **GDELT rate-limits hard (HTTP 429)** from a single IP, which is what the
-  original "58 seconds and nothing" was. It now surfaces as a failed lane
+- **GDELT rate-limits hard from a single IP**, which surfaces as a failed lane
   rather than a zero. Backing off across sweeps, or caching, is unsolved.
 - **Mastodon returns a genuine 0** for most queries: unauthenticated status
   search on mastodon.social is heavily restricted. The endpoint is healthy, so
@@ -300,9 +298,12 @@ trace, all four relevance bands, sticky sidebar, keyboard focus rings,
 and that a finished sweep does not silently re-run.
 - No authentication on the web server. It binds to localhost. Anything beyond
   that needs a reverse proxy with auth first.
-- `adapters/webpage.py` records PDF links but doesn't read them, and regulator
-  circulars are usually PDFs. `pypdf` is already listed as an optional dep.
-- `config.yaml` ships with a placeholder regulator URL.
+- `adapters/webpage.py` reads PDFs via `pypdf`, but a scanned circular has no
+  extractable text. It records `extract_note` saying so rather than storing an
+  empty body that would read as "nothing was published".
+- The `webpage` entry in `config.yaml` is commented out — point it at a
+  regulator you actually watch and check the `link_pattern` with
+  `run.py collect` before trusting it.
 
 ## scamscan
 
@@ -446,8 +447,8 @@ storage: a lost sweep can be re-run, a lost analyst verdict cannot. Set
 `WATCHTOWER_DATA_DIR` to a mounted volume before using the Queue tab in
 anger.
 
-Scheduled mode cannot run on Vercel at all — it needs `adapters/`, which is
-missing, and a persistent database.
+Scheduled mode cannot run on Vercel — it needs a persistent database, so it
+belongs on the GitHub Actions schedule.
 
 ## Legal and ethical constraints
 
@@ -468,11 +469,11 @@ Not boilerplate — these shape the design.
 
 Task prompts live in `prompts/`. Start with `prompts/01-verify-ui.md`.
 
-1. **Write the four `adapters/` modules** so scheduled mode runs at all.
-   (`prompts/01-verify-ui.md` is done: the UI has been rendered, the overflow
-   and `save=true` bugs are fixed, and a "Keep results" toggle now populates
-   the archive.)
-2. Run a live sweep and tune scoring against real results.
-3. PDF extraction pass for `webpage.py`.
-4. CSV/JSON export from the web UI.
-5. Saved queries that re-run on the GitHub Actions schedule.
+1. **Tune scoring against real results.** The pipeline is verified end to end
+   on live data now, so this is the remaining quality lever — start with the
+   scamscan lexicon (`Score` tab is free) and `enrich.py`'s scoring rubric.
+2. **Rebuild the scamscan Sheng lexicon from your own confirmed cases.** It is
+   the only bucket still marked `UNVERIFIED`.
+3. CSV/JSON export from the web UI (scamscan has `export`; watchtower does not).
+4. Saved queries that re-run on the GitHub Actions schedule.
+5. GDELT back-off across runs — it still 429s from a single IP.

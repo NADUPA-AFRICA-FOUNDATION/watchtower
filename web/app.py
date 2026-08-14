@@ -27,7 +27,7 @@ from fastapi.staticfiles import StaticFiles
 from core import report
 from core.enrich import Enricher
 from core.fetch import Fetcher
-from core.sources import BACKENDS, DEFAULT_BACKENDS
+from core.sources import BACKEND_KEYS, BACKENDS, DEFAULT_BACKENDS, has_credentials
 from core.store import Store
 from core.sweep import sweep
 
@@ -64,7 +64,9 @@ app = FastAPI(title="watchtower", docs_url="/api/docs")
 
 
 def config() -> dict:
-    return yaml.safe_load((ROOT / "config.yaml").read_text(encoding="utf-8"))
+    from run import expand_env
+    return expand_env(yaml.safe_load(
+        (ROOT / "config.yaml").read_text(encoding="utf-8")))
 
 
 def data_path(relative) -> Path:
@@ -135,20 +137,12 @@ def list_sources():
     # same question as `default`. opensanctions is both a default and key-gated,
     # so keying the UI off `default` left it selected and silently returning
     # nothing — the worst possible failure for a sanctions check.
-    keyed = {
-        "opensanctions": "OPENSANCTIONS_API_KEY",
-        "web_search": "BRAVE_API_KEY",
-        "opencorporates": "OPENCORPORATES_API_KEY",
-        "x": "X_BEARER_TOKEN",
-        "reddit": "REDDIT_CLIENT_ID",
-        "bluesky": "BLUESKY_APP_PASSWORD",
-    }
     return {
         "sources": [
             {"name": n, "default": n in DEFAULT_BACKENDS,
-             "needs_key": n in keyed,
-             "available": n not in keyed or bool(os.environ.get(keyed[n])),
-             "key_name": keyed.get(n, "")}
+             "needs_key": n in BACKEND_KEYS,
+             "available": has_credentials(n),
+             "key_name": BACKEND_KEYS.get(n, "")}
             for n in BACKENDS
         ],
         "ai_available": enricher.enabled,

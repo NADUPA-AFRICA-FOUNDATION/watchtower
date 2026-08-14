@@ -54,7 +54,27 @@ from core.sweep import sweep
 
 
 def load_config(path: str = "config.yaml") -> dict:
-    return yaml.safe_load(Path(path).read_text(encoding="utf-8"))
+    cfg = yaml.safe_load(Path(path).read_text(encoding="utf-8"))
+    return expand_env(cfg)
+
+
+def expand_env(cfg: dict) -> dict:
+    """Expand ${VAR} in the user agent so a real contact address never has to
+    be committed.
+
+    Wikipedia and SEC EDGAR both want a reachable contact and EDGAR answers 403
+    without one, so "put a real address in config.yaml" was advice that either
+    got ignored or put someone's personal email into version control. The
+    address belongs in .env, which is gitignored, and the config just names it.
+    """
+    fetch = cfg.get("fetch", {})
+    ua = fetch.get("user_agent", "")
+    if "${" in ua:
+        contact = os.environ.get("WATCHTOWER_CONTACT", "")
+        fetch["user_agent"] = (os.path.expandvars(ua) if contact
+                               else ua.replace("${WATCHTOWER_CONTACT}",
+                                               "set WATCHTOWER_CONTACT in .env"))
+    return cfg
 
 
 def make_fetcher(cfg: dict) -> Fetcher:
@@ -244,7 +264,7 @@ def main() -> None:
     )
     ap.add_argument("command",
                     choices=["sweep", "collect", "enrich", "alert", "run",
-                             "search", "stats", "sources", "serve"])
+                             "search", "stats", "sources", "models", "serve"])
     ap.add_argument("query", nargs="?", default="")
     ap.add_argument("--config", default="config.yaml")
     # sweep options
@@ -275,14 +295,54 @@ def main() -> None:
     store = Store(cfg["storage"]["database"])
 
     if args.command == "sources":
+        from core.sources import BACKEND_KEYS, has_credentials
         print("\nAvailable sweep backends:\n")
         for name in BACKENDS:
             mark = "*" if name in DEFAULT_BACKENDS else " "
-            need = ""
-            if name == "opensanctions":
-                need = "  (needs OPENSANCTIONS_API_KEY)"
+            var = BACKEND_KEYS.get(name)
+            if not var:
+                need = ""
+            elif has_credentials(name):
+                need = f"  (key set: {var})"
+            else:
+                # A source that will skip itself is worth saying out loud here:
+                # on the CLI it otherwise only surfaces after a 60s sweep.
+                need = f"  (NEEDS {var} — will be skipped)"
             print(f"  {mark} {name}{need}")
         print("\n  * = used by default\n")
+        store.close()
+        return
+
+    if args.command == "models":
+        from core.enrich import (DEEP_MODEL, GEMINI_DEEP_MODEL,
+                                 GEMINI_TRIAGE_MODEL, TRIAGE_MODEL,
+                                 available_provider)
+        which = available_provider()
+        if not which:
+            print("\nNo model API key set. Add GEMINI_API_KEY (free tier) or "
+                  "ANTHROPIC_API_KEY to .env.\n")
+            store.close()
+            return
+        print(f"\nprovider: {which}")
+        try:
+            if which == "gemini":
+                from google import genai
+                print(f"configured: triage={GEMINI_TRIAGE_MODEL} "
+                      f"deep={GEMINI_DEEP_MODEL}\n")
+                client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
+                for m in client.models.list():
+                    actions = getattr(m, "supported_actions", None) or []
+                    if not actions or "generateContent" in actions:
+                        print(f"  {m.name.replace('models/', ''):42} "
+                              f"{getattr(m, 'display_name', '')}")
+            else:
+                import anthropic
+                print(f"configured: triage={TRIAGE_MODEL} deep={DEEP_MODEL}\n")
+                for m in anthropic.Anthropic().models.list(limit=20).data:
+                    print(f"  {m.id:42} {getattr(m, 'display_name', '')}")
+        except Exception as e:
+            print(f"  could not list models: {type(e).__name__}: {e}")
+        print()
         store.close()
         return
 

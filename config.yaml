@@ -1,9 +1,11 @@
 # Everything you tune lives here. Adding a source should never mean editing code.
 
 fetch:
-  # Put a real contact address in here. Site owners who can reach you will
-  # email before they block you.
-  user_agent: "watchtower/0.1 (monitoring research; you@example.com)"
+  # ${WATCHTOWER_CONTACT} is expanded from .env, which is gitignored — so a
+  # real, reachable address gets sent without being committed. Set it before
+  # running anything sustained: SEC EDGAR answers 403 without a contact, and
+  # site owners who can reach you will email before they block you.
+  user_agent: "watchtower/0.1 (monitoring research; ${WATCHTOWER_CONTACT})"
   delay_seconds: 2.0      # per domain, not global
   timeout_seconds: 20
   obey_robots: true       # leave this on
@@ -58,12 +60,16 @@ sources:
       fetch_body: false
 
   webpage:
-    # Listing pages with no feed. link_pattern narrows to the docs you want.
-    - name: example-regulator
-      url: "https://example.org/press-releases"
-      link_pattern: "/press-release|/notice|\\.pdf$"
-      type: regulatory
-      limit: 15
+    # Listing pages with no feed. This is a link differ, not a scraper: it keys
+    # on the links themselves, so a site redesign does not break it.
+    # link_pattern narrows to the documents you actually want.
+    # Commented out by default — point it at a regulator you actually watch,
+    # and check the pattern with `python run.py collect` before trusting it.
+    # - name: cma-kenya
+    #   url: "https://www.cma.or.ke/press-releases/"
+    #   link_pattern: "/press-release|/notice|/circular|\\.pdf$"
+    #   type: regulatory
+    #   limit: 15
 
   reddit:
     subreddits: []        # e.g. [fintech, kenya]
