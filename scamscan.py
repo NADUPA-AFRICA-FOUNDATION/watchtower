@@ -1304,6 +1304,13 @@ def main():
                     help="prove structured outputs composes with web search (~1 search)")
     st.set_defaults(func=cmd_selftest)
 
+    # Import discover command from osint_discovery module
+    try:
+        from osint_discovery import add_discover_parser
+        add_discover_parser(sub)
+    except ImportError:
+        pass
+
     args = p.parse_args()
     sys.exit(args.func(args) or 0)
 

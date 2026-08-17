@@ -1,14 +1,46 @@
+```
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Database
+scamscan.db
+
+# Logs
+*.log
+
 # Environment
 .env
 .env.local
-.env.*
+*.env.*
 
 # Dependencies
+.venv/
+venv/
 node_modules/
 
-# Logs and temp files
-*.log
-*.tmp
+# Build artifacts
+dist/
+build/
+target/
 
 # Editors
 .vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Coverage
+.coverage
+coverage/
+htmlcov/
+
+# Temp files
+*.tmp
+*.swp
+*.swo
+```
