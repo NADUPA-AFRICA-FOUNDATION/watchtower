@@ -281,6 +281,108 @@ def evaluate_url(url, title, summary, cfg):
     return scored
 
 
+def fetch_and_analyze_url(url, cfg):
+    """Fetch and analyze a single URL for the web API."""
+    # Fetch the URL content
+    try:
+        from core.fetch import Fetcher
+        fetcher = Fetcher(
+            user_agent="Mozilla/5.0 (compatible; FraudGuard/1.0)",
+            delay=0,
+            timeout=20,
+            obey_robots=False
+        )
+        
+        # Fetch page content
+        html_content = fetcher.fetch(url)
+        
+        # Extract text from HTML (simple approach)
+        from bs4 import BeautifulSoup
+        soup = BeautifulSoup(html_content, 'html.parser')
+        
+        # Remove script and style elements
+        for script in soup(['script', 'style']):
+            script.decompose()
+        
+        text = soup.get_text(separator=' ', strip=True)[:10000]
+        title = soup.title.string if soup.title else ""
+        
+        # Create finding structure
+        finding = {
+            "url": url,
+            "title": title or "",
+            "summary": text,
+            "quoted_evidence": text[:2000],
+            "model_confidence": None,
+        }
+        
+        return finding
+        
+    except Exception as e:
+        # Return minimal finding with error info
+        return {
+            "url": url,
+            "title": "",
+            "summary": f"Error fetching URL: {str(e)}",
+            "quoted_evidence": "",
+            "model_confidence": None,
+        }
+
+
+def discover_and_score(brand, limit, cfg):
+    """Discover scams for a brand and return scored results."""
+    results = []
+    seen_urls = set()
+    
+    # Generate queries for this brand
+    brand_cfg = cfg.copy()
+    brand_cfg["brand"]["name"] = brand
+    brand_cfg["brand"]["aliases"] = [brand] + cfg["brand"].get("aliases", [])
+    
+    queries = generate_queries(brand_cfg, brand_keyword=brand)
+    
+    # Search DuckDuckGo
+    for query in queries[:3]:  # Limit queries for speed
+        search_results = search_duckduckgo(query, max_results=limit)
+        
+        for result in search_results:
+            url = result.get('url', '')
+            
+            # Skip already processed URLs
+            if url in seen_urls:
+                continue
+            seen_urls.add(url)
+            
+            # Skip known safe domains
+            if any(white in url for white in ['wikipedia.org', 'github.com', 'twitter.com', 'facebook.com']):
+                continue
+            
+            # Evaluate the URL
+            title = result.get('title', '')
+            summary = result.get('description', '')
+            
+            scored = evaluate_url(url, title, summary, brand_cfg)
+            
+            results.append({
+                "url": url,
+                "title": title,
+                "score": scored.get("score", 0),
+                "scam_type": scored.get("scam_type", "unknown"),
+                "source": "duckduckgo"
+            })
+            
+            if len(results) >= limit:
+                break
+        
+        if len(results) >= limit:
+            break
+    
+    # Sort by score descending
+    results.sort(key=lambda x: x["score"], reverse=True)
+    
+    return results
+
+
 def discover(cfg, limit=20, source="all", brand_keyword=None, dry_run=False):
     """Main discovery function."""
     results = []

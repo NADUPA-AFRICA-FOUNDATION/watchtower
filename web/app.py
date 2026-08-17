@@ -508,6 +508,85 @@ def scamscan_hunt(topics: int = Query(1, ge=1, le=20)):
     )
 
 
+@app.post("/api/scan")
+def scan_url(payload: dict = Body(...)):
+    """Scan a single URL and return structured results for the new UI."""
+    import osint_discovery
+    
+    url = str(payload.get("url", "")).strip()
+    if not url:
+        raise HTTPException(400, "URL is required")
+    
+    cfg = scamscan_config()
+    
+    # Fetch and analyze the URL using existing scamscan logic
+    try:
+        finding = osint_discovery.fetch_and_analyze_url(url, cfg)
+        
+        # Score the finding
+        scored = scamscan.score_finding(finding, cfg)
+        
+        # Format findings list
+        findings_list = []
+        if scored.get("lexicon_points", 0) > 0:
+            findings_list.append(f"Lexicon match: +{scored['lexicon_points']} points")
+        if scored.get("impersonation_points", 0) > 0:
+            findings_list.append(f"Impersonation detected: +{scored['impersonation_points']} points")
+        if scored.get("artifact_points", 0) > 0:
+            findings_list.append(f"Suspicious artifacts: +{scored['artifact_points']} points")
+        if scored.get("counter_term_penalty", 0) > 0:
+            findings_list.append(f"Counter-terms applied: -{scored['counter_term_penalty']} points")
+            
+        # Add specific evidence
+        if finding.get("evidence"):
+            evidence_text = finding["evidence"][:500]
+            if evidence_text:
+                findings_list.append(f"Evidence: {evidence_text}")
+        
+        return {
+            "url": url,
+            "score": scored["score"],
+            "classification": scored.get("scam_type", "Unknown"),
+            "findings": findings_list,
+            "breakdown": scored.get("breakdown", {})
+        }
+        
+    except Exception as e:
+        raise HTTPException(500, f"Analysis failed: {str(e)}")
+
+
+@app.post("/api/discover")
+def discover_scams(payload: dict = Body(...)):
+    """OSINT discovery endpoint for hunting scam sites."""
+    import osint_discovery
+    
+    brand = str(payload.get("brand", "fuliza")).strip().lower()
+    limit = int(payload.get("limit", 5))
+    limit = max(1, min(limit, 20))  # Cap between 1-20
+    
+    cfg = scamscan_config()
+    
+    try:
+        # Use the OSINT discovery module
+        results = osint_discovery.discover_and_score(brand, limit, cfg)
+        
+        # Format results for UI
+        formatted_results = []
+        for item in results:
+            formatted_results.append({
+                "url": item.get("url", ""),
+                "brand": brand,
+                "score": item.get("score", 0),
+                "title": item.get("title", ""),
+                "source": item.get("source", "unknown")
+            })
+        
+        return {"results": formatted_results, "count": len(formatted_results)}
+        
+    except Exception as e:
+        raise HTTPException(500, f"Discovery failed: {str(e)}")
+
+
 @app.get("/api/report/{name}")
 def get_report(name: str):
     cfg = config()
