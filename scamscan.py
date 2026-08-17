@@ -190,11 +190,18 @@ def impersonation_score(url, brand):
         score += 30
         reason.append(f"host loosely resembles {matched} ({best:.2f})")
     if label_hits:
-        score += 35
+        # Stronger weight when multiple brand tokens match or when combined with suspicious TLDs
+        base_impersonation = 40
+        if len(label_hits) > 1:
+            base_impersonation += 10
+        # vercel.app, netlify, firebaseapp.com and similar free hosts are common scam infrastructure
+        if re.search(r"\.(vercel\.app|netlify\.app|netlify\.com|firebaseapp\.com|web\.app|github\.io|pages\.dev)", host, re.I):
+            base_impersonation += 15
+        score += base_impersonation
         reason.append(f"brand token in host: {label_hits[0]}")
-    if re.search(r"(login|verify|secure|account|portal|update|unlock)", host, re.I):
+    if re.search(r"(login|verify|secure|account|portal|update|unlock|boost|limit|loan)", host, re.I):
         score += 20
-        reason.append("credential-themed hostname")
+        reason.append("credential/financial-themed hostname")
     return min(score, 100), "; ".join(reason) or "no host signal"
 
 
