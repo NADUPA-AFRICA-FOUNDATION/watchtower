@@ -6,10 +6,13 @@ source reports in as it lands. The sweep itself runs in a worker thread and
 pushes events onto a queue that the response generator drains.
 
     python run.py serve            # http://127.0.0.1:8000
+    
+Now with async support for fast OSINT discovery using watchtower_async module.
 """
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 import os
@@ -506,6 +509,146 @@ def scamscan_hunt(topics: int = Query(1, ge=1, le=20)):
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
+
+
+@app.post("/api/scan")
+def scan_url(payload: dict = Body(...)):
+    """Scan a single URL and return structured results for the new UI."""
+    import osint_discovery
+    
+    url = str(payload.get("url", "")).strip()
+    if not url:
+        raise HTTPException(400, "URL is required")
+    
+    cfg = scamscan_config()
+    
+    # Fetch and analyze the URL using existing scamscan logic
+    try:
+        finding = osint_discovery.fetch_and_analyze_url(url, cfg)
+        
+        # Score the finding
+        scored = scamscan.score_finding(finding, cfg)
+        
+        # Format findings list
+        findings_list = []
+        if scored.get("lexicon_points", 0) > 0:
+            findings_list.append(f"Lexicon match: +{scored['lexicon_points']} points")
+        if scored.get("impersonation_points", 0) > 0:
+            findings_list.append(f"Impersonation detected: +{scored['impersonation_points']} points")
+        if scored.get("artifact_points", 0) > 0:
+            findings_list.append(f"Suspicious artifacts: +{scored['artifact_points']} points")
+        if scored.get("counter_term_penalty", 0) > 0:
+            findings_list.append(f"Counter-terms applied: -{scored['counter_term_penalty']} points")
+            
+        # Add specific evidence
+        if finding.get("evidence"):
+            evidence_text = finding["evidence"][:500]
+            if evidence_text:
+                findings_list.append(f"Evidence: {evidence_text}")
+        
+        return {
+            "url": url,
+            "score": scored["score"],
+            "classification": scored.get("scam_type", "Unknown"),
+            "findings": findings_list,
+            "breakdown": scored.get("breakdown", {})
+        }
+        
+    except Exception as e:
+        raise HTTPException(500, f"Analysis failed: {str(e)}")
+
+
+@app.post("/api/discover")
+def discover_scams(payload: dict = Body(...)):
+    """OSINT discovery endpoint for hunting scam sites - uses proven DuckDuckGo search."""
+    import osint_discovery
+    
+    brand = str(payload.get("brand", "fuliza")).strip().lower()
+    limit = int(payload.get("limit", 10))
+    limit = max(1, min(limit, 20))  # Cap between 1-20
+    
+    cfg = scamscan_config()
+    
+    try:
+        # Use the proven OSINT discovery module with DuckDuckGo
+        results = osint_discovery.discover_and_score(brand, limit, cfg)
+        
+        # Format results for UI with enhanced data
+        formatted_results = []
+        for item in results:
+            score = item.get("score", 0)
+            formatted_results.append({
+                "url": item.get("url", ""),
+                "brand": brand,
+                "score": score,
+                "classification": "Advance Fee Scam" if score >= 45 else "Suspicious",
+                "title": item.get("title", ""),
+                "source": item.get("source", "duckduckgo"),
+                "findings": [
+                    f"Score: {score:.1f}/100",
+                    f"Found via: {item.get('source', 'search')}"
+                ]
+            })
+        
+        return {
+            "results": formatted_results, 
+            "count": len(formatted_results),
+            "method": "duckduckgo_search"
+        }
+        
+    except Exception as e:
+        logger.error(f"Discovery error: {e}")
+        raise HTTPException(500, f"Discovery failed: {str(e)}")
+
+
+@app.post("/api/discover_async")
+async def discover_scams_experimental(payload: dict = Body(...)):
+    """Experimental async OSINT discovery - faster but may be blocked by search engines."""
+    import watchtower_async
+    
+    brand = str(payload.get("brand", "fuliza")).strip().lower()
+    limit = int(payload.get("limit", 10))
+    timeout = int(payload.get("timeout", 20))
+    
+    cfg = scamscan_config()
+    
+    try:
+        wt_config = {
+            'brand_aliases': cfg.get('brand', {}).get('aliases', [brand]),
+            'suspicious_keywords': list(cfg.get('lexicon', {}).get('advance_fee_scam', {}).keys())[:3],
+            'free_hosting_domains': ["vercel.app", "netlify.app", "firebaseapp.com", "github.io"]
+        }
+        
+        engine = watchtower_async.WatchtowerEngine(wt_config)
+        raw_results = await engine.run_sweep(max_results=limit * 2, timeout_seconds=timeout)
+        
+        # Score discovered URLs
+        scored_results = []
+        for item in raw_results.get('results', []):
+            url = item.get('url', '')
+            if not url:
+                continue
+            scored_results.append({
+                'url': url,
+                'brand': brand,
+                'score': item.get('confidence', 0) * 100,
+                'title': item.get('title', ''),
+                'source': item.get('source', 'unknown'),
+                'confidence': item.get('confidence', 0)
+            })
+        
+        scored_results.sort(key=lambda x: x['score'], reverse=True)
+        
+        return {
+            'results': scored_results[:limit],
+            'count': len(scored_results[:limit]),
+            'time_taken': raw_results.get('time_taken', 0),
+            'method': 'async_multi_source'
+        }
+        
+    except Exception as e:
+        logger.error(f"Async discovery error: {e}")
+        raise HTTPException(500, f"Discovery failed: {str(e)}")
 
 
 @app.get("/api/report/{name}")

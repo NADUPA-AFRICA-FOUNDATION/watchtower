@@ -1,7 +1,20 @@
 {
   "brand": {
     "name": "M-PESA",
-    "aliases": ["mpesa", "m-pesa", "m pesa", "safaricom mpesa"],
+    "aliases": [
+      "mpesa", "m-pesa", "m pesa", "safaricom mpesa",
+      "fuliza", "fuliza limit", "fuliza loan",
+      "shwari", "m-shwari", "mshwari", "kcb mpesa",
+      "kesho", "kcb kesho",
+      "safaricom", "saf",
+      "tala", "branch", "zenka", "okash", "mbire",
+      "equity bank", "eazzy banking",
+      "co-op bank", "coop bank",
+      "kcb", "kcb bank",
+      "ncba", "ncba bank",
+      "absa", "absa bank",
+      "stanbic", "stanbic bank"
+    ],
     "official_domains": ["safaricom.co.ke", "m-pesa.co.ke", "vodacom.co.tz"],
     "official_handles": ["safaricomplc", "safaricom_care", "mpesaafrica"],
     "markets": ["Kenya", "Tanzania", "Lesotho"]
