@@ -81,8 +81,11 @@
       "account has been suspended":            [26, "SAFARICOM"],
       "unlock your account":                   [24, "SAFARICOM"],
 
-      "fuliza limit":                          [30, "SAFARICOM"],
-      "limit increase":                        [18, "SAFARICOM"],
+      "fuliza limit":                          [35, "SAFARICOM"],
+      "limit increase":                        [25, "SAFARICOM"],
+      "increase your limit":                   [25, "UNVERIFIED"],
+      "boost your":                            [25, "UNVERIFIED"],
+      "boost":                                 [15, "UNVERIFIED"],
       "soft loan":                             [24, "COMPASS2025"],
       "loan is now available to all":          [30, "COMPASS2025"],
       "instant loan":                          [16, "DCI"],
@@ -90,12 +93,13 @@
       "guaranteed approval":                   [22, "DCI"],
       "no collateral":                         [14, "DCI"],
 
-      "processing fee":                        [24, "DCI"],
+      "processing fee":                        [30, "DCI"],
       "registration fee":                      [26, "DCI"],
-      "activation fee":                        [26, "DCI"],
+      "activation fee":                        [30, "DCI"],
       "clearance fee":                         [26, "DCI"],
       "shortlisting fee":                      [30, "DCI"],
       "upfront fee":                           [24, "CMA_CBK"],
+      "fee":                                   [15, "UNVERIFIED"],
 
       "you have won":                          [30, "COMPASS2025"],
       "lucky winner":                          [30, "COMPASS2025"],
@@ -141,7 +145,19 @@
       "limited slots":                         [12, "DCI"],
       "act now":                               [10, "PRESS"],
       "do not tell anyone":                    [26, "COMPASS2025"],
-      "keep this confidential":                [22, "COMPASS2025"]
+      "keep this confidential":                [22, "COMPASS2025"],
+
+      "complete a secure payment":             [25, "UNVERIFIED"],
+      "payment confirmation":                  [20, "UNVERIFIED"],
+      "choose your":                           [15, "UNVERIFIED"],
+      "target limit":                          [20, "UNVERIFIED"],
+      "upgrade instantly":                     [20, "UNVERIFIED"],
+      "instant access":                        [18, "UNVERIFIED"],
+      "secure payment":                        [18, "UNVERIFIED"],
+      "protected by":                          [15, "UNVERIFIED"],
+      "no paperwork":                          [20, "UNVERIFIED"],
+      "digitally in minutes":                  [18, "UNVERIFIED"],
+      "continue to payment":                   [25, "UNVERIFIED"]
     },
 
     "sw": {

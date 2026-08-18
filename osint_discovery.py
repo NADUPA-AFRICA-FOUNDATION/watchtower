@@ -188,7 +188,7 @@ def search_duckduckgo(query, max_results=10):
         return []
 
 
-def check_certificate_transparency(domain_pattern, max_results=20):
+def check_certificate_transparency(domain_pattern, max_results=20, official_domains=None):
     """Query Certificate Transparency logs for certificates matching pattern."""
     import urllib.request
     import ssl
@@ -232,9 +232,8 @@ def check_certificate_transparency(domain_pattern, max_results=20):
                     
                     seen_domains.add(domain)
                     
-                    # Skip official domains
-                    official = cfg.get("brand", {}).get("official_domains", [])
-                    if any(domain.endswith(odom.lower()) for odom in official):
+                    # Skip official domains (passed as parameter)
+                    if any(domain.endswith(odom.lower()) for odom in (official_domains or [])):
                         continue
                     
                     # Construct potential URLs
@@ -283,6 +282,9 @@ def evaluate_url(url, title, summary, cfg):
 
 def fetch_and_analyze_url(url, cfg):
     """Fetch and analyze a single URL for the web API."""
+    import re
+    from urllib.parse import urlparse
+    
     # Fetch the URL content
     try:
         from core.fetch import Fetcher
@@ -293,8 +295,9 @@ def fetch_and_analyze_url(url, cfg):
             obey_robots=False
         )
         
-        # Fetch page content
-        html_content = fetcher.fetch(url)
+        # Fetch page content - use .get() method which returns FetchResult
+        result = fetcher.get(url)
+        html_content = result.html if result.ok else ""
         
         # Extract text from HTML (simple approach)
         from bs4 import BeautifulSoup
@@ -315,6 +318,40 @@ def fetch_and_analyze_url(url, cfg):
             "quoted_evidence": text[:2000],
             "model_confidence": None,
         }
+        
+        # --- CRITICAL HEURISTICS (Override AI) ---
+        full_text = (title + " " + text).lower()
+        
+        # 1. INSTANT SCAM DETECTION: Payment/Fee Requests for Official Services
+        payment_triggers = [
+            r"pay\s+(to|for)\s+(unlock|activate|boost|increase)",
+            r"(processing|activation|registration|insurance)\s+fee",
+            r"send\s+(money|cash|mpesa|lipa)\s+to\s+(number|code|till)",
+            r"pay\s+ksh\s+\d+",
+            r"mpesa\s+payment\s+required",
+            r"confirm\s+payment\s+to\s+release",
+            r"fee\s+of\s+ksh",
+            r"pay\s+now\s+to\s+get",
+            r"complete\s+a\s+secure\s+payment",
+            r"continue\s+to\s+payment"
+        ]
+        
+        for pattern in payment_triggers:
+            if re.search(pattern, full_text, re.IGNORECASE):
+                finding["_smoking_gun"] = True
+                finding["_smoking_gun_reason"] = "CRITICAL: Site requests payment/fees for service activation (Definitive Scam Indicator)"
+                break
+        
+        # 2. OFFICIAL DOMAIN CHECK
+        official_domains = cfg.get("brand", {}).get("official_domains", [])
+        parsed = urlparse(url)
+        hostname = parsed.netloc.lower()
+        
+        for official in official_domains:
+            if hostname == official or hostname.endswith("." + official):
+                finding["_is_official"] = True
+                finding["_official_domain"] = official
+                break
         
         return finding
         
