@@ -188,7 +188,7 @@ def search_duckduckgo(query, max_results=10):
         return []
 
 
-def check_certificate_transparency(domain_pattern, max_results=20):
+def check_certificate_transparency(domain_pattern, max_results=20, official_domains=None):
     """Query Certificate Transparency logs for certificates matching pattern."""
     import urllib.request
     import ssl
@@ -232,9 +232,8 @@ def check_certificate_transparency(domain_pattern, max_results=20):
                     
                     seen_domains.add(domain)
                     
-                    # Skip official domains
-                    official = cfg.get("brand", {}).get("official_domains", [])
-                    if any(domain.endswith(odom.lower()) for odom in official):
+                    # Skip official domains (passed as parameter)
+                    if any(domain.endswith(odom.lower()) for odom in (official_domains or [])):
                         continue
                     
                     # Construct potential URLs
