@@ -526,32 +526,62 @@ def scan_url(payload: dict = Body(...)):
     try:
         finding = osint_discovery.fetch_and_analyze_url(url, cfg)
         
-        # Score the finding
+        # Check for official domain (INSTANT SAFE)
+        if finding.get("_is_official"):
+            return {
+                "url": url,
+                "score": 0,
+                "classification": "SAFE",
+                "verdict": "VERIFIED_OFFICIAL",
+                "findings": [f"Verified official domain ({finding.get('_official_domain')})"],
+                "breakdown": {"official_domain": finding.get("_official_domain")}
+            }
+        
+        # Check for smoking gun (INSTANT SCAM)
+        if finding.get("_smoking_gun"):
+            return {
+                "url": url,
+                "score": 100,
+                "classification": "ADVANCE_FEE_SCAM",
+                "verdict": "CONFIRMED_SCAM",
+                "findings": [finding["_smoking_gun_reason"]],
+                "breakdown": {"smoking_gun": True}
+            }
+        
+        # Score the finding normally if no override
         scored = scamscan.score_finding(finding, cfg)
         
         # Format findings list
         findings_list = []
-        if scored.get("lexicon_points", 0) > 0:
-            findings_list.append(f"Lexicon match: +{scored['lexicon_points']} points")
-        if scored.get("impersonation_points", 0) > 0:
-            findings_list.append(f"Impersonation detected: +{scored['impersonation_points']} points")
-        if scored.get("artifact_points", 0) > 0:
-            findings_list.append(f"Suspicious artifacts: +{scored['artifact_points']} points")
-        if scored.get("counter_term_penalty", 0) > 0:
-            findings_list.append(f"Counter-terms applied: -{scored['counter_term_penalty']} points")
+        if scored.get("lexicon_score", 0) > 0:
+            findings_list.append(f"Lexicon match: +{scored['lexicon_score']} points")
+        if scored.get("impersonation_score", 0) > 0:
+            findings_list.append(f"Impersonation detected: +{scored['impersonation_score']} points")
+        if scored.get("artifact_score", 0) > 0:
+            findings_list.append(f"Suspicious artifacts: +{scored['artifact_score']} points")
             
         # Add specific evidence
-        if finding.get("evidence"):
-            evidence_text = finding["evidence"][:500]
+        if finding.get("quoted_evidence"):
+            evidence_text = finding["quoted_evidence"][:500]
             if evidence_text:
                 findings_list.append(f"Evidence: {evidence_text}")
+        
+        # Determine verdict based on score
+        threshold = cfg.get("scoring", {}).get("review_threshold", 45)
+        if scored["score"] >= threshold:
+            verdict = "LIKELY_SCAM"
+        elif scored["score"] >= 20:
+            verdict = "SUSPICIOUS"
+        else:
+            verdict = "LOW_RISK"
         
         return {
             "url": url,
             "score": scored["score"],
             "classification": scored.get("scam_type", "Unknown"),
+            "verdict": verdict,
             "findings": findings_list,
-            "breakdown": scored.get("breakdown", {})
+            "breakdown": scored
         }
         
     except Exception as e:
