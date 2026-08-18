@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import logging
 import os
 import queue
 import secrets
@@ -39,6 +40,8 @@ from core.sweep import sweep
 # from scamscan — a shared front door is not a shared engine, and the moment
 # one starts reaching into the other's store or config that stops being true.
 import scamscan
+
+logger = logging.getLogger(__name__)
 
 ROOT = Path(__file__).resolve().parent.parent
 STATIC = Path(__file__).resolve().parent / "static"
