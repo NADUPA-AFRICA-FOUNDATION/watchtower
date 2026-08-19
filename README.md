@@ -1,13 +1,50 @@
-# watchtower
+# Watchtower / ScamScan
 
-> This repo holds two tools behind one page. **watchtower** (this file) sweeps
-> many sources for a keyword — the **Sweep** and **Archive** tabs. **scamscan**
-> ([SCAMSCAN.md](SCAMSCAN.md)) hunts live scam pages with server-side web
-> search — the **Queue** and **Score** tabs. They share the UI and nothing
-> below it: separate configs, separate databases, neither imports the other.
+> **African Financial Fraud Intelligence Platform**
 
-Type a keyword, get ranked findings across news, regulatory sources, social and
-sanctions lists. Also runs as a scheduled monitor once you know what to watch.
+This repository contains two complementary tools for threat intelligence:
+
+- **Watchtower**: Monitors news, regulatory sources, and sanctions lists for emerging threats
+- **ScamScan**: Actively hunts and analyzes phishing/scam websites targeting African financial services
+
+## Recent Improvements (Evidence-Based Detection)
+
+The platform has been upgraded from simple keyword detection to a comprehensive **evidence-based threat intelligence engine**:
+
+### New Evidence Model
+- **Identity Evidence**: Brand impersonation, typosquatting, lookalike domains
+- **Infrastructure Evidence**: DNS, IP, ASN, hosting, TLS certificates, domain age
+- **Content Evidence**: Forms, payment requests, credential harvesting, page fingerprints
+- **Reputation Evidence**: PhishTank, OpenPhish, URLhaus, ThreatFox, Spamhaus integration
+- **Campaign Evidence**: Related infrastructure, shared artifacts, campaign clustering
+
+### New Verdict Categories
+Instead of simple 0-100 scores, the system now provides explainable verdicts:
+- `CONFIRMED_MALICIOUS` - Strong independent evidence exists
+- `HIGH_RISK` - Multiple suspicious indicators
+- `SUSPICIOUS` - Some concerning indicators  
+- `LOW_RISK` - Limited evidence of malicious activity
+- `VERIFIED_OFFICIAL` - Domain independently validated
+- `UNKNOWN` - Insufficient evidence (Unknown ≠ Safe)
+
+### New Modules
+- `core/evidence.py` - Evidence collection and verdict computation
+- `intelligence/threat_feeds.py` - External threat intelligence integration
+- `enrichment/engine.py` - DNS, RDAP, TLS, IP enrichment
+- `hunters/` - Discovery modules (search engines, CT logs, feeds)
+- `detection/` - Analysis modules (brand impersonation, content analysis)
+- `campaigns/` - Campaign clustering and relationship mapping
+
+See [IMPROVEMENTS.md](IMPROVEMENTS.md) for the complete roadmap.
+
+---
+
+## Quick Start
+
+```bash
+python run.py serve      # web UI at http://127.0.0.1:8000
+python run.py sweep "beneficial ownership Kenya" --hours 168
+```
 
 ```bash
 python run.py serve      # web UI at http://127.0.0.1:8000
