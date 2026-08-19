@@ -314,6 +314,33 @@ def score_finding(finding, cfg):
     w = sc["weights"]
     denom = sum(w.get(k, 0) for k in families) or 1
     total = sum(families[k] * w.get(k, 0) for k in families) / denom
+    
+    # CRITICAL FIX: Strong signals should not be diluted by absent signals
+    # If impersonation is high (>=70), this indicates brand abuse regardless of content
+    # If we have strong impersonation + suspicious infrastructure, boost the score
+    from urllib.parse import urlparse
+    url = finding.get("url", "")
+    host = urlparse(url).netloc.lower() if url else ""
+    
+    # Free hosting platforms commonly used for scams
+    free_hosts = ["vercel.app", "netlify.app", "firebaseapp.com", "web.app", "pages.dev", "github.io"]
+    on_free_host = any(fh in host for fh in free_hosts)
+    
+    # Boost score when impersonation is strong AND on suspicious infrastructure
+    if imp >= 70 and on_free_host:
+        # Add infrastructure bonus: impersonation + free hosting = likely scam
+        infra_bonus = 25
+        total = max(total, imp * 0.7 + infra_bonus)  # Ensure minimum elevation
+    
+    # Also boost when impersonation alone is very strong (>=75)
+    # This prevents dilution when lexicon/artifact signals are absent
+    if imp >= 75:
+        total = max(total, 60)  # Minimum SUSPICIOUS-HIGH range
+    
+    if imp >= 85:
+        total = max(total, 75)  # Minimum HIGH_RISK range
+    
+    total = min(100, total)
 
     return {
         "score": round(total, 1),
@@ -325,6 +352,7 @@ def score_finding(finding, cfg):
         "artifacts": artifacts,
         "lexicon_hits": lex_hits[:12],
         "impersonation_reason": imp_reason,
+        "infrastructure_flags": {"on_free_host": on_free_host} if on_free_host else {},
     }
 
 

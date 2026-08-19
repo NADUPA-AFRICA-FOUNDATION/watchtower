@@ -518,12 +518,42 @@ def scamscan_hunt(topics: int = Query(1, ge=1, le=20)):
 def scan_url(payload: dict = Body(...)):
     """Scan a single URL and return structured results for the new UI."""
     import osint_discovery
+    from urllib.parse import urlparse
     
     url = str(payload.get("url", "")).strip()
     if not url:
         raise HTTPException(400, "URL is required")
     
     cfg = scamscan_config()
+    
+    def _compute_confidence(scored: dict) -> float:
+        """Compute confidence based on evidence completeness."""
+        signals_present = 0
+        total_signals = 5
+        
+        if scored.get("lexicon_score", 0) > 0:
+            signals_present += 1
+        if scored.get("impersonation_score", 0) > 0:
+            signals_present += 1
+        if scored.get("artifact_score", 0) > 0:
+            signals_present += 1
+        if scored.get("model_score") is not None:
+            signals_present += 1
+        
+        # Infrastructure flags count as evidence
+        infra = scored.get("infrastructure_flags", {})
+        if infra:
+            signals_present += 0.5
+        
+        # Base confidence from signal coverage
+        base_conf = signals_present / total_signals
+        
+        # Boost confidence when strong signals are present
+        imp_score = scored.get("impersonation_score", 0)
+        if imp_score >= 70:
+            base_conf = max(base_conf, 0.8)  # High confidence in strong impersonation
+        
+        return min(1.0, base_conf)
     
     # Fetch and analyze the URL using existing scamscan logic
     try:
@@ -554,7 +584,7 @@ def scan_url(payload: dict = Body(...)):
         # Score the finding normally if no override
         scored = scamscan.score_finding(finding, cfg)
         
-        # Format findings list
+        # Format findings list with explainable evidence
         findings_list = []
         if scored.get("lexicon_score", 0) > 0:
             findings_list.append(f"Lexicon match: +{scored['lexicon_score']} points")
@@ -562,6 +592,11 @@ def scan_url(payload: dict = Body(...)):
             findings_list.append(f"Impersonation detected: +{scored['impersonation_score']} points")
         if scored.get("artifact_score", 0) > 0:
             findings_list.append(f"Suspicious artifacts: +{scored['artifact_score']} points")
+        
+        # Add infrastructure flags as evidence
+        infra_flags = scored.get("infrastructure_flags", {})
+        if infra_flags.get("on_free_host"):
+            findings_list.append("Hosted on free platform commonly used for scams (Vercel/Netlify/etc)")
             
         # Add specific evidence
         if finding.get("quoted_evidence"):
@@ -569,22 +604,40 @@ def scan_url(payload: dict = Body(...)):
             if evidence_text:
                 findings_list.append(f"Evidence: {evidence_text}")
         
-        # Determine verdict based on score
-        threshold = cfg.get("scoring", {}).get("review_threshold", 45)
-        if scored["score"] >= threshold:
-            verdict = "LIKELY_SCAM"
-        elif scored["score"] >= 20:
+        # Add impersonation reason
+        if scored.get("impersonation_reason"):
+            findings_list.append(f"Why: {scored['impersonation_reason']}")
+        
+        # Determine verdict based on score with improved thresholds
+        # Using evidence-based categories instead of simple thresholds
+        score = scored["score"]
+        imp_score = scored.get("impersonation_score", 0)
+        
+        # Verdict logic based on evidence strength
+        if score >= 80 or imp_score >= 85:
+            verdict = "HIGH_RISK"
+            classification = "Brand Impersonation / Advance Fee Scam"
+        elif score >= 60 or imp_score >= 70:
             verdict = "SUSPICIOUS"
-        else:
+            classification = "Suspected Brand Impersonation"
+        elif score >= 40:
+            verdict = "SUSPICIOUS"
+            classification = scored.get("scam_type", "Suspicious Activity")
+        elif score >= 20:
             verdict = "LOW_RISK"
+            classification = "Low Risk Indicators"
+        else:
+            verdict = "UNKNOWN"
+            classification = "Insufficient Evidence"
         
         return {
             "url": url,
-            "score": scored["score"],
-            "classification": scored.get("scam_type", "Unknown"),
+            "score": score,
+            "classification": classification,
             "verdict": verdict,
             "findings": findings_list,
-            "breakdown": scored
+            "breakdown": scored,
+            "confidence": _compute_confidence(scored)  # Add confidence metric
         }
         
     except Exception as e:
