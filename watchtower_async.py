@@ -45,6 +45,43 @@ class WatchtowerEngine:
         self.last_request_time = 0
         self.min_request_interval = 0.2  # 200ms between requests to same domain
         
+        # Import trusted domains list
+        try:
+            from core.trusted_domains import TRUSTED_DOMAINS
+            self.trusted_domains = TRUSTED_DOMAINS
+        except ImportError:
+            # Fallback inline list if import fails
+            self.trusted_domains = {
+                "google.com", "chatgpt.com", "openai.com", "play.google.com",
+                "apps.apple.com", "github.com", "facebook.com", "twitter.com",
+                "linkedin.com", "bing.com", "microsoft.com"
+            }
+    
+    def _is_trusted_domain(self, domain: str) -> bool:
+        """Check if a domain is trusted (should be excluded from scam results)"""
+        if not domain:
+            return False
+        
+        domain = domain.lower().strip()
+        
+        # Exact match
+        if domain in self.trusted_domains:
+            return True
+        
+        # Check base domains for nested subdomains
+        parts = domain.split('.')
+        if len(parts) >= 2:
+            for i in range(len(parts)):
+                base = '.'.join(parts[i:])
+                if base in self.trusted_domains:
+                    return True
+        
+        # Check government TLDs
+        if domain.endswith('.gov.ke') or domain.endswith('.go.ke'):
+            return True
+            
+        return False
+        
     async def _init_session(self):
         if self.session is None:
             timeout = aiohttp.ClientTimeout(total=12, connect=8)
@@ -116,6 +153,12 @@ class WatchtowerEngine:
             for match in matches[:15]:  # Limit per query
                 clean_url = match.replace('&amp;', '&')
                 if 'google.com' not in clean_url and 'webcache' not in clean_url:
+                    # CRITICAL: Filter out trusted domains
+                    parsed = urlparse(clean_url)
+                    domain = parsed.netloc.lower()
+                    if self._is_trusted_domain(domain):
+                        continue
+                        
                     results.append(DiscoveryResult(
                         url=clean_url,
                         source='google',
@@ -144,6 +187,12 @@ class WatchtowerEngine:
             
             for match in matches[:15]:
                 clean_url = match.replace('&amp;', '&')
+                # CRITICAL: Filter out trusted domains
+                parsed = urlparse(clean_url)
+                domain = parsed.netloc.lower()
+                if self._is_trusted_domain(domain):
+                    continue
+                    
                 results.append(DiscoveryResult(
                     url=clean_url,
                     source='duckduckgo',
@@ -172,6 +221,12 @@ class WatchtowerEngine:
             
             for match in matches[:15]:
                 if 'bing.com' not in match and 'microsoft.com' not in match:
+                    # CRITICAL: Filter out trusted domains
+                    parsed = urlparse(match)
+                    domain = parsed.netloc.lower()
+                    if self._is_trusted_domain(domain):
+                        continue
+                        
                     results.append(DiscoveryResult(
                         url=match,
                         source='bing',

@@ -390,8 +390,15 @@ def discover_and_score(brand, limit, cfg):
                 continue
             seen_urls.add(url)
             
-            # Skip known safe domains
-            if any(white in url for white in ['wikipedia.org', 'github.com', 'twitter.com', 'facebook.com']):
+            # Skip known safe domains using the trusted_domains module
+            from core.trusted_domains import is_trusted_domain
+            from urllib.parse import urlparse
+            
+            parsed = urlparse(url)
+            domain = parsed.netloc.lower()
+            
+            if is_trusted_domain(domain):
+                logger.debug(f"Skipping trusted domain: {domain}")
                 continue
             
             # Evaluate the URL
@@ -493,6 +500,17 @@ def discover(cfg, limit=20, source="all", brand_keyword=None, dry_run=False):
         # Skip blocked/official domains
         blocked = cfg.get("search", {}).get("blocked_domains", [])
         if any(registrable(url).endswith(bd) for bd in blocked):
+            continue
+        
+        # CRITICAL: Skip trusted domains (chatgpt.com, openai.com, google.com, etc.)
+        from core.trusted_domains import is_trusted_domain
+        from urllib.parse import urlparse
+        
+        parsed = urlparse(url)
+        domain = parsed.netloc.lower()
+        
+        if is_trusted_domain(domain):
+            logger.debug(f"Skipping trusted domain during OSINT discovery: {domain}")
             continue
         
         # Score the finding
