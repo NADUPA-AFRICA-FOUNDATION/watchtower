@@ -27,6 +27,22 @@ python scamscan.py selftest              # free: config, schemas, lexicon
 python scamscan.py hunt --config config.json --topics 1   # start with one topic
 ```
 
+## Brand profiles and discovery budgets
+
+`config.json` selects `active_brand`; the complete profiles live in
+`brands.json`. A profile keeps names, products, official identity, markets,
+languages, misspellings, available assets, and observed campaign phrases
+together. Add another key under `profiles` and select it without mixing one
+institution's products or domains into another institution's identity.
+
+Discovery is deterministic and split into seven `query_family` lanes: exact
+names, credential bait, financial/advance-fee bait, artifacts recovered from
+earlier findings, domain/homoglyph variants, platform syntax (including free
+hosts), and reused campaign artifacts. `search.query_family_budgets` caps each
+lane independently. In particular, increasing the free-host list cannot consume
+the budgets reserved for artifact pivots or exact-name searches. Query events,
+stored findings, and run summaries retain the family for auditability.
+
 ## Testing before you pay
 
 Verified on a live free-tier Gemini key: **Google Search grounding is not
@@ -39,7 +55,7 @@ but three of the four things worth testing do not.
 | Scoring quality — the thing that sets analyst workload | yes, entirely local | `scamscan.py test "<copy>" --url <url>`, or the **Score** tab |
 | Lexicon, counter terms, thresholds | yes | same; every hit shows its source |
 | Config, provider, schemas, model IDs | yes | `scamscan.py selftest`, `scamscan.py models` |
-| The queries the model will actually run | yes — expansion uses no search tool | `scamscan.py hunt --topics 1 --dry-run` |
+| The budgeted queries the hunt will run | yes — planning is local | `scamscan.py hunt --topics 1 --dry-run` |
 | Extraction from live pages | **no** | needs grounding |
 
 Do the first four first. Scoring is where the quality lives, it is deterministic,

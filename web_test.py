@@ -262,7 +262,7 @@ def main():
 
         # Seed one finding through scamscan's own writer, so the test exercises
         # the same rows a real hunt produces rather than a hand-built fixture.
-        cfg = json.loads((Path(__file__).parent / "config.json").read_text())
+        cfg = scamscan.load_config(Path(__file__).parent / "config.json")
         finding = {"url": "http://mpesa-verify.co.ke/login", "title": "verify now",
                    "scam_type": "phishing", "summary": "Send your PIN to unlock",
                    "quoted_evidence": "send your pin", "model_confidence": 0.9}

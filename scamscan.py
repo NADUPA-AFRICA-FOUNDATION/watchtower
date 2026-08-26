@@ -34,6 +34,7 @@ import sqlite3
 import sys
 import time
 import unicodedata
+from pathlib import Path
 from urllib.parse import urlparse
 from datetime import datetime, timezone
 
@@ -66,6 +67,20 @@ if genai is not None:
     logging.getLogger("google_genai.types").addFilter(_DropThoughtPartWarning())
 
 DB_PATH = "scamscan.db"
+
+
+def load_config(path="config.json"):
+    """Load configuration and resolve the selected brand profile."""
+    path = Path(path)
+    cfg = json.loads(path.read_text(encoding="utf-8"))
+    if "brand" not in cfg:
+        brands_path = path.parent / cfg.get("brands_file", "brands.json")
+        profiles = json.loads(brands_path.read_text(encoding="utf-8")).get("profiles", {})
+        selected = cfg.get("active_brand")
+        if selected not in profiles:
+            raise ValueError(f"active_brand {selected!r} is not present in {brands_path}")
+        cfg["brand"] = profiles[selected]
+    return cfg
 
 
 def load_env(path=None):
@@ -404,12 +419,16 @@ def db_connect(path=DB_PATH):
             evidence    TEXT,
             scam_type   TEXT,
             query       TEXT,
+            query_family TEXT,
             score       REAL,
             breakdown   TEXT,
             disposition TEXT DEFAULT 'new',
             analyst_note TEXT
         )"""
     )
+    columns = {row[1] for row in con.execute("PRAGMA table_info(findings)")}
+    if "query_family" not in columns:
+        con.execute("ALTER TABLE findings ADD COLUMN query_family TEXT")
     con.commit()
     return con
 
@@ -422,7 +441,7 @@ def fingerprint(finding):
     return hashlib.sha256(f"{url}|{body}".encode()).hexdigest()[:32]
 
 
-def upsert(con, finding, scored, query):
+def upsert(con, finding, scored, query, query_family=None):
     fp = fingerprint(finding)
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
     row = con.execute("SELECT times_seen FROM findings WHERE fingerprint=?", (fp,)).fetchone()
@@ -435,8 +454,8 @@ def upsert(con, finding, scored, query):
     con.execute(
         """INSERT INTO findings
            (fingerprint, first_seen, last_seen, url, title, summary, evidence,
-            scam_type, query, score, breakdown)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+            scam_type, query, query_family, score, breakdown)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
         (
             fp, now, now,
             finding.get("url", ""),
@@ -445,6 +464,7 @@ def upsert(con, finding, scored, query):
             finding.get("quoted_evidence", ""),
             finding.get("scam_type", "unknown"),
             query,
+            query_family,
             scored["score"],
             json.dumps(scored),
         ),
@@ -989,80 +1009,66 @@ def hunt_query(client, cfg, query, state=None, progress=None):
 
 
 def hunt(client, cfg, con, topics=None, progress=None, state=None, dry_run=False):
-    """One discovery pass. Returns a summary; reports as it goes via progress().
+    """Run the deterministic, independently budgeted discovery query plan."""
+    from discovery.query_plan import build_query_plan
 
-    progress(dict) is the same contract as watchtower's sweep(): the CLI renders
-    the dicts as lines, the web layer forwards them as SSE frames, and neither
-    owns the format. Add a field rather than changing an existing one.
-
-    dry_run expands the topics into queries and stops before searching. Query
-    expansion uses no search tool, so it runs on a Gemini free-tier key where
-    the grounded leg does not — which makes it the cheap way to check the
-    config, the provider wiring and the queries themselves before paying for a
-    single search. It never touches the database, and `complete` is false, so a
-    dry run can never be mistaken for a hunt that found nothing.
-    """
     progress = progress or (lambda e: None)
     state = state or RunState()
     _, tool_note = web_search_tool(cfg)
-    seeds = cfg["seed_topics"][:topics] if topics else cfg["seed_topics"]
+    previous = [dict(r) for r in con.execute(
+        "SELECT summary, evidence AS quoted_evidence FROM findings ORDER BY last_seen DESC LIMIT 100"
+    ).fetchall()]
+    plan = build_query_plan(
+        cfg["brand"], cfg["search"].get("query_family_budgets", {}), previous,
+        cfg["search"].get("free_hosting_domains", ()))
+    if topics:
+        counts, limited = {}, []
+        for item in plan:
+            counts[item.query_family] = counts.get(item.query_family, 0) + 1
+            if counts[item.query_family] <= topics:
+                limited.append(item)
+        plan = limited
 
     summary = {"seen": 0, "new": 0, "queries_run": 0, "failures": [],
-               "topics": len(seeds), "tool": tool_note,
+               "topics": len(cfg["seed_topics"]), "planned_queries": len(plan),
+               "query_families": {}, "tool": tool_note,
                "model": model_for(cfg), "provider": provider(cfg),
                "structured": bool(cfg["search"].get("structured_outputs", True)),
                "escalated": 0, "dry_run": bool(dry_run)}
     progress({"type": "start", **summary})
 
-    for topic in seeds:
-        progress({"type": "topic", "topic": topic})
-        try:
-            queries = expand_queries(client, cfg, topic, state)
-        except Exception as e:
-            reason = f"topic {topic!r}: expansion failed: {e}"
-            summary["failures"].append(reason)
-            progress({"type": "unsearched", "scope": "topic", "topic": topic,
-                      "reason": str(e)})
+    for item in plan:
+        q, family = item.query, item.query_family
+        summary["query_families"][family] = summary["query_families"].get(family, 0) + 1
+        progress({"type": "query", "query": q, "query_family": family})
+        if dry_run:
             continue
-
-        for q in queries:
-            progress({"type": "query", "query": q})
-            if dry_run:
-                continue
-            try:
-                findings = hunt_query(client, cfg, q, state, progress)
-            except HuntError as e:
-                summary["failures"].append(f"{q!r}: {e}")
-                progress({"type": "unsearched", "scope": "query", "query": q,
-                          "reason": str(e), "searched": False})
-                continue
-            except Exception as e:
-                summary["failures"].append(f"{q!r}: {type(e).__name__}: {e}")
-                progress({"type": "unsearched", "scope": "query", "query": q,
-                          "reason": f"{type(e).__name__}: {e}", "searched": False})
-                continue
-            summary["queries_run"] += 1
-
-            for f in findings:
-                scored = score_finding(f, cfg)
-                is_new = upsert(con, f, scored, q)
-                summary["seen"] += 1
-                summary["new"] += is_new
-                escalate = scored["score"] >= cfg["scoring"]["auto_escalate_threshold"]
-                summary["escalated"] += bool(escalate)
-                progress({"type": "finding", "new": bool(is_new),
-                          "escalate": bool(escalate), "score": scored["score"],
-                          "url": f.get("url", ""), "title": f.get("title", ""),
-                          "scam_type": f.get("scam_type", "unknown"),
-                          "fingerprint": fingerprint(f)})
-            con.commit()
+        try:
+            findings = hunt_query(client, cfg, q, state, progress)
+        except Exception as e:
+            reason = str(e) if isinstance(e, HuntError) else f"{type(e).__name__}: {e}"
+            summary["failures"].append(f"{q!r}: {reason}")
+            progress({"type": "unsearched", "scope": "query", "query": q,
+                      "query_family": family, "reason": reason, "searched": False})
+            continue
+        summary["queries_run"] += 1
+        for finding in findings:
+            scored = score_finding(finding, cfg)
+            is_new = upsert(con, finding, scored, q, family)
+            summary["seen"] += 1
+            summary["new"] += is_new
+            escalate = scored["score"] >= cfg["scoring"]["auto_escalate_threshold"]
+            summary["escalated"] += bool(escalate)
+            progress({"type": "finding", "new": bool(is_new),
+                      "query_family": family, "escalate": bool(escalate),
+                      "score": scored["score"], "url": finding.get("url", ""),
+                      "title": finding.get("title", ""),
+                      "scam_type": finding.get("scam_type", "unknown"),
+                      "fingerprint": fingerprint(finding)})
+        con.commit()
 
     con.commit()
     summary["structured_disabled"] = state.structured_disabled
-    # An empty queue is a claim about the brand. Only make it when the searches
-    # actually ran, so the caller can tell the two apart without re-deriving it.
-    # A dry run searched nothing at all, so it is never complete — that is the
-    # whole reason it is safe to run.
     summary["complete"] = (not dry_run and not summary["failures"]
                            and summary["queries_run"] > 0)
     progress({"type": "done", **summary})
@@ -1075,7 +1081,7 @@ def hunt(client, cfg, con, topics=None, progress=None, state=None, dry_run=False
 
 
 def cmd_hunt(args):
-    cfg = json.load(open(args.config))
+    cfg = load_config(args.config)
     which = provider(cfg)
     if not which:
         sys.exit("No model API key. Set GEMINI_API_KEY (free tier) or "
@@ -1172,7 +1178,7 @@ def cmd_dispose(args):
 
 def cmd_test(args):
     """Score sample text without touching the API - for tuning weights offline."""
-    cfg = json.load(open(args.config))
+    cfg = load_config(args.config)
     finding = {
         "url": args.url,
         "title": "sample",
@@ -1218,7 +1224,7 @@ def cmd_selftest(args):
     tools (the control), one structured with web search. Roughly one search plus
     a few hundred tokens.
     """
-    cfg = json.load(open(args.config))
+    cfg = load_config(args.config)
     ok = True
 
     print("schemas")
@@ -1297,7 +1303,7 @@ def cmd_models(args):
     Model IDs move faster than this file does and a free-tier key does not see
     all of them, so the config default is a starting point, not a promise.
     """
-    cfg = json.load(open(args.config))
+    cfg = load_config(args.config)
     which = provider(cfg)
     if not which:
         sys.exit("No model API key. Set GEMINI_API_KEY or ANTHROPIC_API_KEY.")

@@ -300,7 +300,7 @@ SCAMSCAN_CONFIG = ROOT / "config.json"
 
 def scamscan_config() -> dict:
     try:
-        return json.loads(SCAMSCAN_CONFIG.read_text(encoding="utf-8"))
+        return scamscan.load_config(SCAMSCAN_CONFIG)
     except FileNotFoundError:
         raise HTTPException(503, "config.json is missing — scamscan is not configured")
     except json.JSONDecodeError as e:
