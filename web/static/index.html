@@ -139,7 +139,7 @@
     <div>
       <span class="eyebrow">ScamScan / OSINT</span>
       <h1>Discover impersonating sites</h1>
-      <p>Search public indexes for candidate sites, then rank the evidence already visible in their search results.</p>
+      <p>Rank candidate relevance first, then show risk only when the site was successfully validated.</p>
     </div>
     <span class="method-badge">search evidence</span>
   </header>
@@ -199,8 +199,8 @@
   <form class="console" id="queue-form" autocomplete="off">
     <div class="controls">
       <fieldset class="control">
-        <legend>Minimum score</legend>
-        <div class="segmented" id="min-score" role="radiogroup" aria-label="Minimum score">
+        <legend>Minimum validated risk</legend>
+        <div class="segmented" id="min-risk-score" role="radiogroup" aria-label="Minimum validated risk score">
           <button type="button" role="radio" data-s="0">all</button>
           <button type="button" role="radio" data-s="45" class="is-on" aria-checked="true">review</button>
           <button type="button" role="radio" data-s="80">escalate</button>

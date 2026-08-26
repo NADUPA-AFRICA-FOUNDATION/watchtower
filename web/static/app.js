@@ -484,7 +484,7 @@ function segmented(id, attr, apply) {
     loadQueue();
   };
 }
-segmented("#min-score", "s", (v) => { minScore = Number(v); });
+segmented("#min-risk-score", "s", (v) => { minScore = Number(v); });
 segmented("#disposition", "d", (v) => { disposition = v; });
 
 $("#queue-form").onsubmit = (e) => { e.preventDefault(); loadQueue(); };
@@ -494,7 +494,7 @@ async function loadQueue() {
   out.replaceChildren(el("p", "hint", "Loading…"));
   try {
     const r = await fetch(
-      `/api/scamscan/queue?min_score=${minScore}&disposition=${disposition}`);
+      `/api/scamscan/queue?min_risk_score=${minScore}&disposition=${disposition}`);
     if (!r.ok) {
       const err = await r.json();
       out.replaceChildren(el("p", "errs", err.detail || "Could not read the queue."));
@@ -508,7 +508,7 @@ async function loadQueue() {
       box.append(
         el("h3", null, "Nothing in the queue"),
         el("p", null,
-          `No stored finding scores ${minScore}+ with disposition "${disposition}". ` +
+          `No stored finding has validated risk ${minScore}+ with disposition "${disposition}". ` +
           "That is a statement about this database, not about the brand — run a " +
           "hunt above, or widen the filters."));
       out.replaceChildren(box);
@@ -621,12 +621,13 @@ $("#discover-form").onsubmit = async (e) => {
 
 function discoveryCard(item) {
   const c = el("article", "card");
-  const band = item.score >= 80 ? "HIGH" : item.score >= 45 ? "MED"
-    : item.score >= 20 ? "LOW" : "WEAK";
+  const band = item.risk_score == null ? "WEAK" : item.risk_score >= 80 ? "HIGH"
+    : item.risk_score >= 45 ? "MED" : item.risk_score >= 20 ? "LOW" : "WEAK";
   c.style.setProperty("--band", BAND_COLOUR[band]);
 
   const top = el("div", "card-top");
-  top.append(gauge(band), el("span", "score", Math.round(item.score || 0)),
+  top.append(el("span", "flag", `priority ${Math.round(item.discovery_priority || 0)}`),
+    el("span", "score", item.risk_score == null ? "risk —" : `risk ${Math.round(item.risk_score)}`),
     el("span", "flag", item.classification || "candidate"));
   c.append(top);
 
@@ -652,7 +653,8 @@ function discoveryCard(item) {
     c.append(el("p", "reason", `host: ${b.impersonation_reason}`));
   }
   c.append(el("p", "candidate-note",
-    "Candidate only — confirm against the live page and independent evidence."));
+    `${item.validation_status}; evidence coverage ${Math.round((item.evidence_coverage || 0) * 100)}%. ` +
+    "Discovery priority is not a risk assessment."));
   return c;
 }
 
@@ -661,7 +663,8 @@ function queueCard(item) {
   c.style.setProperty("--band", BAND_COLOUR[item.band] || "var(--weak)");
 
   const top = el("div", "card-top");
-  top.append(gauge(item.band), el("span", "score", Math.round(item.score)));
+  top.append(gauge(item.band), el("span", "score", `risk ${Math.round(item.risk_score)}`));
+  if (item.discovery_priority != null) top.append(el("span", "flag", `priority ${Math.round(item.discovery_priority)}`));
   if (item.times_seen > 1) {
     const s = el("span", "corrob", `seen ${item.times_seen}x`);
     s.title = `First seen ${item.first_seen}, last ${item.last_seen}`;
@@ -789,7 +792,7 @@ function startHunt(topics) {
   huntStream.addEventListener("finding", (ev) => {
     const d = JSON.parse(ev.data);
     logLine("log-find",
-      `${d.new ? "NEW" : "dup"} ${Math.round(d.score)}  ${d.url.slice(0, 68)}`,
+      `${d.new ? "NEW" : "dup"} risk ${Math.round(d.risk_score)}  ${d.url.slice(0, 68)}`,
       d.title);
   });
   huntStream.addEventListener("note", (ev) => {
@@ -875,10 +878,10 @@ function scoreCard(d) {
   c.style.setProperty("--band", BAND_COLOUR[d.band] || "var(--weak)");
 
   const top = el("div", "card-top");
-  top.append(gauge(d.band), el("span", "score", Math.round(d.score)));
+  top.append(gauge(d.band), el("span", "score", `risk ${Math.round(d.risk_score)}`));
   const verdict =
-    d.score >= d.escalate_threshold ? "escalate now"
-    : d.score >= d.review_threshold ? "needs review"
+    d.risk_score >= d.escalate_threshold ? "escalate now"
+    : d.risk_score >= d.review_threshold ? "needs review"
     : "below the review threshold";
   top.append(el("span", "flag", verdict));
   c.append(top);

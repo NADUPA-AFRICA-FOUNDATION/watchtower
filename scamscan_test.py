@@ -168,6 +168,7 @@ def main():
     ok &= check("search snippets contribute to OSINT risk ratings",
                 snippet_score["lexicon_score"] > 0)
     original_search = osint_discovery.search_duckduckgo
+    original_fetch = osint_discovery.fetch_and_analyze_url
     original_brand = json.loads(json.dumps(CFG["brand"]))
     try:
         osint_discovery.search_duckduckgo = lambda query, max_results=10: [{
@@ -176,12 +177,36 @@ def main():
             "summary": "Pay a processing fee to activate",
             "source": "test-search",
         }]
+        osint_discovery.fetch_and_analyze_url = lambda url, cfg: {
+            "url": url, "title": "Fuliza activation",
+            "summary": "Pay a processing fee to activate",
+            "quoted_evidence": "Pay a processing fee to activate",
+            "validation_status": "validated", "evidence_coverage": .6,
+        }
         discovered = discover_and_score("fuliza", 1, CFG)
     finally:
         osint_discovery.search_duckduckgo = original_search
-    ok &= check("discovery keeps the snippet and explainable breakdown",
+        osint_discovery.fetch_and_analyze_url = original_fetch
+    ok &= check("discovery separates priority from validated risk",
                 discovered[0]["summary"]
-                and discovered[0]["breakdown"]["lexicon_score"] > 0)
+                and discovered[0]["discovery_priority"] > 0
+                and discovered[0]["risk_score"] is not None
+                and discovered[0]["evidence_coverage"] == .6)
+    try:
+        osint_discovery.search_duckduckgo = lambda query, max_results=10: [{
+            "url": "https://fuliza-offer.example", "title": "Fuliza",
+            "summary": "activate now", "source": "test-search"}]
+        osint_discovery.fetch_and_analyze_url = lambda url, cfg: {
+            "url": url, "validation_status": "unavailable", "evidence_coverage": 0}
+        unavailable = discover_and_score("fuliza", 1, CFG)[0]
+    finally:
+        osint_discovery.search_duckduckgo = original_search
+        osint_discovery.fetch_and_analyze_url = original_fetch
+    ok &= check("an unfetched candidate has priority but no risk assessment",
+                unavailable["discovery_priority"] > 0
+                and unavailable["risk_score"] is None
+                and unavailable["validation_status"] == "unavailable"
+                and unavailable["evidence_coverage"] == 0)
     ok &= check("one brand search does not mutate later searches",
                 CFG["brand"] == original_brand)
 
@@ -247,7 +272,7 @@ def main():
     ok &= check("different site stays separate — cross-site reuse is signal",
                 fingerprint(a1) != fingerprint(b1))
 
-    print("\na missing model_confidence must not silently demote a finding")
+    print("\nmodel confidence is provenance, not validated risk evidence")
     strong = {"url": "http://mpesa-verify.co.ke/login",
               "title": "verify", "quoted_evidence": "send your pin",
               "summary": "guaranteed returns, double your money. Paybill 247247"}
@@ -255,27 +280,28 @@ def main():
     with_conf = score_finding({**strong, "model_confidence": 0.9}, CFG)
     zeroed = score_finding({**strong, "model_confidence": 0.0}, CFG)
 
-    ok &= check("absent confidence is excluded, not scored as zero",
-                without["score"] > zeroed["score"])
-    ok &= check("and the run records which families it scored on",
-                "model" not in without["scored_on"]
-                and "model" in with_conf["scored_on"])
-    ok &= check("an explicit 0.0 still counts against the finding",
+    ok &= check("model confidence cannot change validated risk",
+                without["risk_score"] == zeroed["risk_score"]
+                == with_conf["risk_score"])
+    ok &= check("risk records exactly the five allowed evidence families",
+                set(without["scored_on"]) == {"identity", "content",
+                    "infrastructure", "reputation", "campaign"})
+    ok &= check("an explicit 0.0 remains visible as provenance",
                 zeroed["model_score"] == 0.0)
-    # The precise property: average over the families that reported, so the
-    # score is the mean of three, not of three plus a phantom zero.
-    local_mean = round((without["lexicon_score"] + without["artifact_score"]
-                        + without["impersonation_score"]) / 3, 1)
-    ok &= check("the score is the mean of the families that reported",
-                without["score"] == local_mean)
-    ok &= check("which is worth ~25% of the range on this fixture",
-                without["score"] - (local_mean * 3 / 4) > 15)
+    expected = round(without["risk_evidence"]["identity"] * .30
+                     + without["risk_evidence"]["content"] * .30
+                     + without["risk_evidence"]["infrastructure"] * .15, 1)
+    ok &= check("risk uses only validated identity, content and infrastructure here",
+                without["risk_score"] == expected)
+    unavailable = score_finding({**strong, "validation_status": "unavailable"}, CFG)
+    ok &= check("unavailable validation can never produce a risk score",
+                unavailable["risk_score"] is None)
     ok &= check("a malformed confidence is ignored, not crashed on",
                 isinstance(score_finding({**strong, "model_confidence": "n/a"},
-                                         CFG)["score"], float))
+                                         CFG)["risk_score"], float))
     ok &= check("scores stay within 0-100",
                 0 <= score_finding({**strong, "model_confidence": 9.9},
-                                   CFG)["score"] <= 100)
+                                   CFG)["risk_score"] <= 100)
 
     print("\na failed web search must not look like a clean brand")
     # The API reports these as HTTP 200 with an error object in the result
