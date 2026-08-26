@@ -160,21 +160,23 @@ class DiscoveryError(RuntimeError):
 def generate_queries(cfg, brand_keyword=None):
     """Generate search queries based on brand aliases and search templates."""
     brand = cfg.get("brand", {})
-    aliases = brand.get("aliases", [])
+    excluded = {
+        re.sub(r"[^a-z0-9]", "", value.lower())
+        for value in brand.get("excluded_brands", [])
+    }
+    aliases = [
+        alias for alias in brand.get("aliases", [])
+        if re.sub(r"[^a-z0-9]", "", alias.lower()) not in excluded
+    ]
     
     # Use specific brand keyword if provided, otherwise use main aliases
     if brand_keyword:
         keywords = [brand_keyword]
     else:
-        # Prioritize high-value keywords
-        keywords = []
-        for alias in aliases:
-            alias_lower = alias.lower()
-            # Prioritize financial product names and brand names
-            if any(term in alias_lower for term in ["fuliza", "shwari", "kcb", "tala", "branch", "zenka"]):
-                keywords.insert(0, alias)
-            elif len(alias.split()) <= 2:  # Short aliases are better for search
-                keywords.append(alias)
+        # Priority comes only from this profile's configured aliases. A former
+        # hard-coded list named competing institutions and contaminated every
+        # active brand profile with unrelated searches.
+        keywords = [alias for alias in aliases if len(alias.split()) <= 2]
         
         # Ensure we have at least the main brand name
         if not keywords and aliases:
