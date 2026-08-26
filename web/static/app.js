@@ -18,6 +18,7 @@ const BAND_SEGMENTS = { HIGH: 5, MED: 4, LOW: 2, WEAK: 1 };
 let selected = new Set();
 let hours = 72;
 let stream = null;
+let capabilities = {};
 
 /* ------------------------------------------------------------ bootstrap */
 
@@ -29,6 +30,21 @@ async function init() {
     $("#ai-status").textContent = "server unreachable";
     return;
   }
+  capabilities = data;
+
+  const unavailable = data.sources.filter((s) => s.available === false);
+  const statusDetails = $("#status-details");
+  statusDetails.replaceChildren(
+    el("li", null, `${data.sources.length - unavailable.length} of ${data.sources.length} sources available`),
+    el("li", null, data.ai_available
+      ? `Model scoring available (${data.ai_provider})` : "Model scoring unavailable — keyword ranking only"),
+    el("li", null, data.ephemeral_storage
+      ? "Temporary storage — saving and analyst verdicts are disabled" : "Durable local storage available"),
+    ...unavailable.map((s) => el("li", null, `${s.name}: unavailable (${s.key_name || "configuration required"})`)),
+  );
+  $("#system-status-summary").textContent = data.ephemeral_storage
+    ? `${unavailable.length} source${unavailable.length === 1 ? "" : "s"} unavailable · temporary storage`
+    : `${unavailable.length} source${unavailable.length === 1 ? "" : "s"} unavailable · storage ready`;
 
   const box = $("#sources");
   const sanctionsBox = $("#sanctions-source");
@@ -70,6 +86,8 @@ async function init() {
   // succeed, and find an empty Archive tab later — a silent data loss.
   if (data.ephemeral_storage) {
     const keep = $("#keep");
+    keep.checked = false;
+    keep.disabled = true;
     keep.closest(".toggle").title =
       "This deployment has no persistent disk — saved results are lost between requests.";
     const note = el("p", "hint warn-note",
@@ -95,6 +113,12 @@ async function init() {
   }
 }
 
+$("#status-toggle").onclick = () => {
+  const details = $("#status-details");
+  details.hidden = !details.hidden;
+  $("#status-toggle").setAttribute("aria-expanded", String(!details.hidden));
+};
+
 /* -------------------------------------------------------------- controls */
 
 $("#window").onclick = (e) => {
@@ -109,6 +133,24 @@ $("#window").onclick = (e) => {
   hours = Number(b.dataset.h);
 };
 
+function radioKeys(group, apply) {
+  group.addEventListener("keydown", (e) => {
+    if (!["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "Home", "End"].includes(e.key)) return;
+    const buttons = [...group.querySelectorAll('[role="radio"]:not([disabled])')];
+    const current = buttons.indexOf(document.activeElement);
+    let next = current < 0 ? 0 : current;
+    if (["ArrowRight", "ArrowDown"].includes(e.key)) next = (next + 1) % buttons.length;
+    if (["ArrowLeft", "ArrowUp"].includes(e.key)) next = (next - 1 + buttons.length) % buttons.length;
+    if (e.key === "Home") next = 0;
+    if (e.key === "End") next = buttons.length - 1;
+    e.preventDefault();
+    buttons[next].click();
+    buttons[next].focus();
+    if (apply) apply(buttons[next]);
+  });
+}
+radioKeys($("#window"));
+
 /* Two tools, one front door. The views are independent — nothing on the
    scamscan side reads watchtower's store and vice versa — so switching sides
    is only ever showing and hiding, never a state handover. */
@@ -116,16 +158,30 @@ const VIEWS = ["sweep", "archive", "discover", "queue", "score"];
 
 document.querySelectorAll(".tab").forEach((tab) => {
   tab.onclick = () => {
-    document.querySelectorAll(".tab").forEach((t) => t.classList.remove("is-on"));
+    document.querySelectorAll(".tab").forEach((t) => {
+      t.classList.remove("is-on");
+      t.removeAttribute("aria-current");
+    });
     tab.classList.add("is-on");
+    tab.setAttribute("aria-current", "page");
     VIEWS.forEach((v) => {
       const section = document.getElementById(`view-${v}`);
       if (section) section.hidden = tab.dataset.view !== v;
     });
     $("#rail-name").textContent = (tab.dataset.side || "watchtower").toUpperCase();
+    if (location.hash !== `#${tab.dataset.view}`) location.hash = tab.dataset.view;
+    const heading = document.querySelector(`#view-${tab.dataset.view} .view-head`);
+    if (heading) heading.focus();
     if (tab.dataset.view === "queue") loadQueue();
   };
 });
+
+function openHashView() {
+  const view = location.hash.slice(1);
+  const tab = document.querySelector(`.tab[data-view="${view}"]`);
+  if (tab && !tab.classList.contains("is-on")) tab.click();
+}
+window.addEventListener("hashchange", openHashView);
 
 /* ----------------------------------------------------------------- sweep */
 
@@ -141,11 +197,11 @@ function startSweep(q) {
   if (stream) stream.close();
 
   $("#go").disabled = true;
-  $("#go").textContent = "Sweeping";
+  $("#go").textContent = "Monitoring";
   $("#results").hidden = true;
   $("#empty").hidden = true;
   $("#trace").hidden = false;
-  $("#trace-title").textContent = `Sweeping "${q}"`;
+  $("#trace-title").textContent = `Monitoring "${q}"`;
   $("#trace-stage").textContent = "";
 
   const lanes = $("#lanes");
@@ -226,10 +282,18 @@ function startSweep(q) {
 function finish() {
   if (stream) { stream.close(); stream = null; }
   $("#go").disabled = false;
-  $("#go").textContent = "Sweep";
+  $("#go").textContent = "Monitor";
   $("#trace-stage").textContent = "";
   $("#trace-title").textContent = "Sources";
 }
+
+$("#cancel-sweep").onclick = () => {
+  if (!stream) return;
+  stream.close();
+  stream = null;
+  finish();
+  showEmpty("Updates stopped", "The browser stopped listening. Requests already sent to providers may still finish or incur cost.");
+};
 
 /* --------------------------------------------------------------- render */
 
@@ -420,7 +484,7 @@ $("#archive-form").onsubmit = async (e) => {
     out.replaceChildren(
       ...(d.items.length
         ? d.items.map(card)
-        : [el("p", "hint", "Nothing saved matches that. Tick “Keep results” on the Sweep tab to start filling the archive.")])
+        : [el("p", "hint", "Nothing saved matches that. Turn on “Keep results” in Monitor to start filling saved results.")])
     );
   } catch {
     out.replaceChildren(el("p", "errs", "Could not reach the server."));
@@ -463,6 +527,8 @@ async function initScamscan() {
   // verdicts are the whole point and they are what gets lost.
   if (d.ephemeral_storage) {
     notes.push("Storage on this host is temporary — findings and the verdicts you record on them are lost between requests.");
+    $("#hunt-go").disabled = true;
+    $("#hunt-go").title = "Hunts require durable storage so findings and verdicts are not lost";
   }
   $("#hunt-cost").textContent = notes.join(" ");
   $("#hunt-cost").hidden = false;
@@ -483,6 +549,7 @@ function segmented(id, attr, apply) {
     apply(b.dataset[attr]);
     loadQueue();
   };
+  radioKeys($(id));
 }
 segmented("#min-score", "s", (v) => { minScore = Number(v); });
 segmented("#disposition", "d", (v) => { disposition = v; });
@@ -615,7 +682,7 @@ $("#discover-form").onsubmit = async (e) => {
     out.replaceChildren(el("p", "errs", "Could not reach the discovery service."));
   } finally {
     button.disabled = false;
-    button.textContent = "Discover";
+    button.textContent = "Find sites";
   }
 };
 
@@ -722,6 +789,10 @@ function verdictRow(item) {
   ["confirmed", "false_positive", "unclear", "escalated"].forEach((v) => {
     const b = el("button", "chip", v.replace("_", " "));
     b.type = "button";
+    if (scam.ephemeral_storage) {
+      b.disabled = true;
+      b.title = "Analyst verdicts require durable storage";
+    }
     if (item.disposition === v) b.classList.add("is-on");
     b.onclick = async () => {
       row.querySelectorAll("button").forEach((x) => x.classList.remove("is-on"));
@@ -817,6 +888,14 @@ function startHunt(topics) {
   };
 }
 
+$("#cancel-hunt").onclick = () => {
+  if (!huntStream) return;
+  huntStream.close();
+  huntStream = null;
+  finishHunt();
+  logLine("log-fail", "UPDATES STOPPED — provider requests already sent may still finish or incur cost.");
+};
+
 function finishHunt() {
   if (huntStream) { huntStream.close(); huntStream = null; }
   $("#hunt-go").disabled = !scam.api_available ? true : false;
@@ -906,3 +985,4 @@ function scoreCard(d) {
 
 init();
 initScamscan();
+openHashView();

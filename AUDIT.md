@@ -23,6 +23,26 @@ That is a narrower and more defensible statement than “every function works.�
 The unverified areas below must not be represented to an analyst as working
 coverage until their live contract checks have run.
 
+## Implementation status
+
+This audit now doubles as a delivery checklist. The first remediation pass has
+implemented the changes that fit the current architecture without pretending a
+larger security or job-system project is complete:
+
+- **Implemented:** task-oriented navigation labels and descriptive view
+  headings; URL hash navigation; visible, expandable coverage/system status;
+  explicit ARIA state and arrow-key operation for custom radio groups; controls
+  to stop receiving long-running SSE updates; and hard UI/API gates preventing
+  saved results, paid hunts and analyst verdicts on ephemeral storage.
+- **Deliberately transparent limitation:** “Stop updates” closes the browser
+  stream, but a provider request already issued may still finish or incur cost.
+  The control says so rather than claiming server-side cancellation that the
+  current thread-based worker cannot provide.
+- **Still planned:** durable cancellable jobs, OIDC/RBAC, managed persistent
+  storage, audit/health APIs, live-provider canaries, browser automation,
+  contract tests and user research. These require deployment and product
+  decisions beyond a safe frontend-only patch.
+
 ## Function audit and verification gaps
 
 ### P0 — must be explicit before operational use
@@ -107,16 +127,16 @@ in help text, not as the only navigation cue.
 
 | Priority | Principle | Finding | Recommendation / acceptance check |
 |---|---|---|---|
-| P0 | Error prevention | Durable and ephemeral actions look alike. | Disable save/disposition actions without durable storage; explain inline how to enable them. |
-| P0 | User control | Long sweeps and billed hunts have no explicit cancel control. | Add **Cancel** beside the running action, close SSE, cancel queued work and show whether already-issued calls may still bill. |
-| P0 | Visibility | Provider health is compressed into a small status indicator and tooltips. | Add a labelled **Coverage & system status** panel with enabled, limited, failed, last checked and credential owner states. Never rely on colour or hover alone. |
+| Done | Error prevention | Durable and ephemeral actions looked alike. | Save, hunt and disposition actions are now disabled in the UI and rejected by the API without durable storage. |
+| Partial | User control | Long sweeps and billed hunts had no stop control. | **Stop updates** now closes SSE and explicitly warns about issued calls; true server cancellation remains part of the Job API work. |
+| Partial | Visibility | Provider health was compressed into a small status indicator and tooltips. | A labelled **Coverage & system status** panel now exposes source, scoring and storage state; live health timestamps still require canaries. |
 | P0 | Error recovery | Fetch/stream failures mainly end in prose. | Give errors a short cause, retained inputs, **Retry failed sources**, and a copyable diagnostic ID. Move focus to an error summary. |
-| P1 | Match to users | “Sweep,” “Discover,” “Queue,” and “Score” require product knowledge. | Adopt the action labels above; validate with five representative analysts using first-click tasks. |
+| Partial | Match to users | “Sweep,” “Discover,” “Queue,” and “Score” required product knowledge. | Action labels and headings are implemented; validate them with five representative analysts using first-click tasks. |
 | P1 | Progressive disclosure | Source selection, sanctions, depth and retention choices appear before a novice can form a basic query. | Default to a safe “Standard search”; place sources and model/cost options in **Advanced options**, while keeping sanctions visibly separate. |
 | P1 | Consistency | Watchtower and ScamScan share a rail but have different workflows and event terms. | Add a persistent product heading and one-sentence purpose; preserve explicit `unsearched` versus `failed` wording. |
 | P1 | Recognition | Score bands such as review/escalate are unexplained at the decision point. | Add a compact legend describing thresholds, evidence families and “unknown is not safe.” |
-| P1 | Accessibility | Custom button radiogroups initialise `aria-checked` only on selected choices. | Give every radio an explicit state, implement arrow-key movement/roving tabindex, and verify with axe plus keyboard tests. |
-| P1 | Navigation | Tabs are buttons and view state is not linkable. | Use links/routes or update history and focus on view change; support refresh, deep links and browser Back. |
+| Partial | Accessibility | Custom button radiogroups initialised `aria-checked` only on selected choices. | Every radio now has explicit state and arrow-key/roving focus; axe and screen-reader verification remain. |
+| Done | Navigation | View state was not linkable. | Hash navigation, focus management, refresh/deep links and browser history are now supported. |
 | P2 | Minimalism | Large configuration blocks compete with results. | Collapse completed forms into a run summary while results are visible; provide **Edit search**. |
 | P2 | Help | Operator syntax and compliance warnings are present but scattered. | Add task-based examples, a glossary, and contextual “Why?” disclosures for cost, retention, scores and incomplete coverage. |
 | P2 | Responsive use | Dense cards can become lengthy on mobile. | Prioritise score, source, title and primary action; collapse evidence details with accessible disclosure controls. |

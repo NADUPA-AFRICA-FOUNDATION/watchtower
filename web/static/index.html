@@ -22,14 +22,14 @@
   <nav class="rail-nav">
     <div class="side-group" data-side="watchtower">
       <span class="side-label">watchtower</span>
-      <button class="tab is-on" data-view="sweep" data-side="watchtower">Sweep</button>
-      <button class="tab" data-view="archive" data-side="watchtower">Archive</button>
+      <button class="tab is-on" data-view="sweep" data-side="watchtower" aria-current="page">Monitor</button>
+      <button class="tab" data-view="archive" data-side="watchtower">Saved results</button>
     </div>
     <div class="side-group" data-side="scamscan">
       <span class="side-label">scamscan</span>
-      <button class="tab" data-view="discover" data-side="scamscan">Discover</button>
-      <button class="tab" data-view="queue" data-side="scamscan">Queue</button>
-      <button class="tab" data-view="score" data-side="scamscan">Score</button>
+      <button class="tab" data-view="discover" data-side="scamscan">Find scam sites</button>
+      <button class="tab" data-view="queue" data-side="scamscan">Review queue</button>
+      <button class="tab" data-view="score" data-side="scamscan">Quick score</button>
     </div>
   </nav>
   <div class="rail-status" id="ai-status" title="Relevance scoring status"></div>
@@ -37,8 +37,23 @@
 
 <main>
 
+<section class="system-status" id="system-status" aria-labelledby="system-status-title">
+  <div>
+    <span class="eyebrow" id="system-status-title">Coverage &amp; system status</span>
+    <p id="system-status-summary">Checking available sources, scoring and storage…</p>
+  </div>
+  <button type="button" class="status-toggle" id="status-toggle" aria-expanded="false"
+          aria-controls="status-details">Details</button>
+  <ul id="status-details" hidden></ul>
+</section>
+
 <!-- ============================ SWEEP ============================ -->
 <section id="view-sweep">
+
+  <header class="view-head compact-head" tabindex="-1">
+    <div><span class="eyebrow">Watchtower / Monitor</span><h1>Monitor current sources</h1>
+    <p>Search news, regulatory, reference and selected social sources for a topic.</p></div>
+  </header>
 
   <form class="console" id="sweep-form" autocomplete="off">
     <label class="field-label" for="q">What are you looking for</label>
@@ -46,7 +61,7 @@
       <input id="q" name="q" type="text" spellcheck="false"
              placeholder="beneficial ownership Kenya"
              aria-describedby="q-hint">
-      <button type="submit" id="go">Sweep</button>
+      <button type="submit" id="go">Monitor</button>
     </div>
     <p class="hint" id="q-hint">
       Plain keywords work. GDELT also takes operators:
@@ -57,10 +72,10 @@
       <fieldset class="control">
         <legend>Look back</legend>
         <div class="segmented" id="window" role="radiogroup" aria-label="Lookback window">
-          <button type="button" role="radio" data-h="24">24h</button>
+          <button type="button" role="radio" data-h="24" aria-checked="false" tabindex="-1">24h</button>
           <button type="button" role="radio" data-h="72" class="is-on" aria-checked="true">72h</button>
-          <button type="button" role="radio" data-h="168">7d</button>
-          <button type="button" role="radio" data-h="720">30d</button>
+          <button type="button" role="radio" data-h="168" aria-checked="false" tabindex="-1">7d</button>
+          <button type="button" role="radio" data-h="720" aria-checked="false" tabindex="-1">30d</button>
         </div>
       </fieldset>
 
@@ -98,8 +113,9 @@
   <!-- signature element: sources report in live as the sweep runs -->
   <section class="trace" id="trace" hidden aria-live="polite">
     <div class="trace-head">
-      <span class="trace-title" id="trace-title">Sweeping</span>
+      <span class="trace-title" id="trace-title">Monitoring</span>
       <span class="trace-stage" id="trace-stage"></span>
+      <button type="button" class="cancel-run" id="cancel-sweep">Stop updates</button>
     </div>
     <div class="trace-lanes" id="lanes"></div>
   </section>
@@ -117,6 +133,8 @@
 
 <!-- =========================== ARCHIVE =========================== -->
 <section id="view-archive" hidden>
+  <header class="view-head compact-head" tabindex="-1"><div><span class="eyebrow">Watchtower / Saved results</span>
+    <h1>Search saved results</h1><p>Return to findings you deliberately retained from earlier monitoring runs.</p></div></header>
   <form class="console" id="archive-form" autocomplete="off">
     <label class="field-label" for="aq">Search everything you've kept</label>
     <div class="field">
@@ -192,6 +210,7 @@
     <div class="trace-head">
       <span class="trace-title" id="hunt-title">Hunting</span>
       <span class="trace-stage" id="hunt-stage"></span>
+      <button type="button" class="cancel-run" id="cancel-hunt">Stop updates</button>
     </div>
     <div class="hunt-log" id="hunt-log"></div>
   </section>
@@ -201,18 +220,18 @@
       <fieldset class="control">
         <legend>Minimum score</legend>
         <div class="segmented" id="min-score" role="radiogroup" aria-label="Minimum score">
-          <button type="button" role="radio" data-s="0">all</button>
+          <button type="button" role="radio" data-s="0" aria-checked="false" tabindex="-1">all</button>
           <button type="button" role="radio" data-s="45" class="is-on" aria-checked="true">review</button>
-          <button type="button" role="radio" data-s="80">escalate</button>
+          <button type="button" role="radio" data-s="80" aria-checked="false" tabindex="-1">escalate</button>
         </div>
       </fieldset>
       <fieldset class="control">
         <legend>Disposition</legend>
         <div class="segmented" id="disposition" role="radiogroup" aria-label="Disposition">
           <button type="button" role="radio" data-d="new" class="is-on" aria-checked="true">new</button>
-          <button type="button" role="radio" data-d="escalated">escalated</button>
-          <button type="button" role="radio" data-d="confirmed">confirmed</button>
-          <button type="button" role="radio" data-d="all">all</button>
+          <button type="button" role="radio" data-d="escalated" aria-checked="false" tabindex="-1">escalated</button>
+          <button type="button" role="radio" data-d="confirmed" aria-checked="false" tabindex="-1">confirmed</button>
+          <button type="button" role="radio" data-d="all" aria-checked="false" tabindex="-1">all</button>
         </div>
       </fieldset>
     </div>

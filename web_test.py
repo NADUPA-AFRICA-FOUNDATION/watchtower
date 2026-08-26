@@ -222,6 +222,17 @@ def main():
         ok &= check("and tells the UI storage is ephemeral",
                     pc.get("/api/sources", auth=("watchtower", "hunter2"))
                       .json()["ephemeral_storage"] is True)
+        ok &= check("ephemeral storage rejects misleading save requests",
+                    pc.get("/api/sweep?q=test&save=true",
+                           auth=("watchtower", "hunter2")).status_code == 409)
+        ok &= check("ephemeral storage rejects analyst verdicts",
+                    pc.post("/api/scamscan/dispose",
+                            auth=("watchtower", "hunter2"),
+                            json={"fingerprint": "x", "verdict": "confirmed"})
+                      .status_code == 409)
+        ok &= check("ephemeral storage rejects hunts whose findings would be lost",
+                    pc.get("/api/scamscan/hunt?topics=1",
+                           auth=("watchtower", "hunter2")).status_code == 409)
     finally:
         os.environ.clear()
         os.environ.update(saved)
@@ -442,6 +453,21 @@ def main():
                     r'"(\w+)"', re.search(r'VIEWS\s*=\s*\[([^\]]+)\]', js).group(1))))
     ok &= check("the rail names the side you are on",
                 'id="rail-name"' in html and "#rail-name" in js)
+    ok &= check("navigation uses task-oriented labels",
+                all(label in html for label in
+                    ("Monitor", "Saved results", "Find scam sites",
+                     "Review queue", "Quick score")))
+    ok &= check("system status is visible and expandable",
+                'id="system-status"' in html and 'id="status-details"' in html
+                and 'id="status-toggle"' in html)
+    radios = re.findall(r'<button[^>]+role="radio"[^>]*>', html)
+    ok &= check("every custom radio declares its accessibility state",
+                radios and all('aria-checked=' in radio for radio in radios))
+    ok &= check("custom radios support arrow-key navigation",
+                "function radioKeys" in js and "ArrowRight" in js)
+    ok &= check("long-running views offer a stop-updates control",
+                'id="cancel-sweep"' in html and 'id="cancel-hunt"' in html
+                and "Requests already sent" in js)
     for cls in (".side-group", ".side-label"):
         ok &= check(f"{cls} is styled", cls in css)
 
