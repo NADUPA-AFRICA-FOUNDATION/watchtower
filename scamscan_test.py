@@ -36,6 +36,8 @@ from scamscan import (DYNAMIC_FILTERING_MODELS, FINDINGS_SCHEMA,
                       grounding_failures, model_for, provider,
                       search_failures, structured_rejected, term_pattern,
                       term_weight, web_search_tool)
+import osint_discovery
+from osint_discovery import discover_and_score, evaluate_url, select_queries
 
 CFG = json.load(open(Path(__file__).parent / "config.json"))
 
@@ -147,6 +149,41 @@ def main():
     ok &= check("a lookalike suffix is not treated as free hosting",
                 not score_finding({"url": "https://fuliza-vercel.app.evil.example"},
                                   CFG)["infrastructure_flags"])
+
+    print("\nOSINT candidate quality")
+    chosen = select_queries([
+        'site:vercel.app "fuliza"',
+        'site:netlify.app "fuliza"',
+        'site:vercel.app "fuliza" loan',
+        '"fuliza" "processing fee"',
+        'inurl:fuliza inurl:login',
+    ])
+    ok &= check("query budget covers each discovery family",
+                any(q.startswith("site:") and q.endswith('"fuliza"') for q in chosen)
+                and any(" loan" in q for q in chosen)
+                and any("processing fee" in q for q in chosen)
+                and any(q.startswith("inurl:") for q in chosen))
+    snippet_score = evaluate_url("https://offers.example", "Fuliza offer",
+                                 "Pay a processing fee to activate", CFG)
+    ok &= check("search snippets contribute to OSINT risk ratings",
+                snippet_score["lexicon_score"] > 0)
+    original_search = osint_discovery.search_duckduckgo
+    original_brand = json.loads(json.dumps(CFG["brand"]))
+    try:
+        osint_discovery.search_duckduckgo = lambda query, max_results=10: [{
+            "url": "https://fuliza-offer.example",
+            "title": "Fuliza activation",
+            "summary": "Pay a processing fee to activate",
+            "source": "test-search",
+        }]
+        discovered = discover_and_score("fuliza", 1, CFG)
+    finally:
+        osint_discovery.search_duckduckgo = original_search
+    ok &= check("discovery keeps the snippet and explainable breakdown",
+                discovered[0]["summary"]
+                and discovered[0]["breakdown"]["lexicon_score"] > 0)
+    ok &= check("one brand search does not mutate later searches",
+                CFG["brand"] == original_brand)
 
     print("\nlexicon")
     hits, _ = lexicon_score("guaranteed returns, double your money", CFG["lexicon"])

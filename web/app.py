@@ -661,19 +661,28 @@ def discover_scams(payload: dict = Body(...)):
         
         # Format results for UI with enhanced data
         formatted_results = []
+        review = cfg.get("scoring", {}).get("review_threshold", 45)
+        escalate = cfg.get("scoring", {}).get("auto_escalate_threshold", 80)
         for item in results:
             score = item.get("score", 0)
+            if score >= escalate:
+                classification = "High risk"
+            elif score >= review:
+                classification = "Needs review"
+            else:
+                classification = "Weak signal"
             formatted_results.append({
                 "url": item.get("url", ""),
                 "brand": brand,
                 "score": score,
-                "classification": "Advance Fee Scam" if score >= 45 else "Suspicious",
+                "classification": classification,
                 "title": item.get("title", ""),
                 "source": item.get("source", "duckduckgo"),
                 "findings": [
                     f"Score: {score:.1f}/100",
-                    f"Found via: {item.get('source', 'search')}"
-                ]
+                    f"Found via: {item.get('source', 'search')}",
+                ],
+                "breakdown": item.get("breakdown", {}),
             })
         
         return {
