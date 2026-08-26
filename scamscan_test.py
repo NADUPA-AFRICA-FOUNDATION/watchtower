@@ -39,7 +39,7 @@ from scamscan import (DYNAMIC_FILTERING_MODELS, FINDINGS_SCHEMA,
 import osint_discovery
 from osint_discovery import discover_and_score, evaluate_url, select_queries
 
-CFG = json.load(open(Path(__file__).parent / "config.json"))
+CFG = __import__("scamscan").load_config(Path(__file__).parent / "config.json")
 
 
 def check(label, cond):

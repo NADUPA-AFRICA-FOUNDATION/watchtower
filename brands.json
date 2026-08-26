@@ -1,0 +1,54 @@
+{
+  "profiles": {
+    "mpesa": {
+      "name": "M-PESA",
+      "aliases": [
+        "mpesa",
+        "m-pesa",
+        "m pesa",
+        "safaricom mpesa"
+      ],
+      "products": [
+        "Fuliza",
+        "M-Shwari",
+        "KCB M-PESA"
+      ],
+      "official_domains": [
+        "safaricom.co.ke",
+        "m-pesa.co.ke",
+        "vodacom.co.tz"
+      ],
+      "official_handles": [
+        "safaricomplc",
+        "safaricom_care",
+        "mpesaafrica"
+      ],
+      "markets": [
+        "Kenya",
+        "Tanzania",
+        "Lesotho"
+      ],
+      "languages": [
+        "English",
+        "Kiswahili",
+        "Sheng"
+      ],
+      "common_misspellings": [
+        "mpessa",
+        "mpeesa",
+        "m-pessa",
+        "safaricom mpessa"
+      ],
+      "brand_assets": [
+        "https://www.safaricom.co.ke/images/MPESA-logo.png"
+      ],
+      "campaign_phrases": [
+        "Pochi la Biashara",
+        "Fuliza limit increase",
+        "You have won",
+        "Pokea pesa",
+        "loan is now available to all"
+      ]
+    }
+  }
+}
