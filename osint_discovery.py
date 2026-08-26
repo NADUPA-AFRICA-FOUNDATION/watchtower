@@ -103,6 +103,43 @@ SEARCH_TEMPLATES = [
     'inurl:{brand} inurl:loan',
 ]
 
+
+def lexicon_query_terms(cfg, limit=12):
+    """Return strong, sourced bait phrases for discovery queries.
+
+    The lexicon used to influence ranking only *after* a search engine happened
+    to return a candidate.  That left most of its carefully sourced language
+    idle during discovery.  Prefer high-weight phrases, but round-robin across
+    languages so English cannot consume the entire query budget.  Unverified
+    terms remain useful for scoring, but are too weak a basis for spending a
+    search request.
+    """
+    by_language = []
+    for language, entries in cfg.get("lexicon", {}).items():
+        candidates = []
+        for term, entry in entries.items():
+            if isinstance(entry, (list, tuple)):
+                weight = float(entry[0]) if entry else 0
+                source = str(entry[1]) if len(entry) > 1 else ""
+            else:  # Backwards-compatible with older, bare-number lexicons.
+                weight, source = float(entry), ""
+            clean_term = term.strip()
+            if (weight >= 20 and source != "UNVERIFIED"
+                    and len(clean_term) >= 6
+                    and clean_term[0].isalnum()
+                    and clean_term[-1].isalnum()):
+                candidates.append((weight, term.strip()))
+        candidates.sort(key=lambda item: (-item[0], item[1]))
+        if candidates:
+            by_language.append([term for _, term in candidates])
+
+    selected = []
+    while len(selected) < limit and any(by_language):
+        for terms in by_language:
+            if terms and len(selected) < limit:
+                selected.append(terms.pop(0))
+    return selected
+
 # Certificate Transparency query endpoints
 CT_SEARCH_URL = "https://crt.sh/?q=%.{domain}&output=json"
 
@@ -138,6 +175,20 @@ def generate_queries(cfg, brand_keyword=None):
     
     queries = []
     seen = set()
+
+    # Search for the language the detector can actually recognise, not just a
+    # small hard-coded English subset. Parentheses distinguish this family in
+    # select_queries(), where it receives its own share of the request budget.
+    for keyword in keywords:
+        clean_keyword = keyword.replace('"', '').strip()
+        if not clean_keyword:
+            continue
+        for term in lexicon_query_terms(cfg):
+            clean_term = term.replace('"', '').strip()
+            query = f'"{clean_keyword}" ("{clean_term}")'
+            if query not in seen:
+                seen.add(query)
+                queries.append(query)
     
     for template in SEARCH_TEMPLATES:
         for keyword in keywords:
@@ -156,17 +207,19 @@ def generate_queries(cfg, brand_keyword=None):
     return queries
 
 
-def select_queries(queries, limit=8):
+def select_queries(queries, limit=10):
     """Choose a small but diverse set instead of only the first host dorks.
 
     ``generate_queries`` is grouped by template.  Taking its first few entries
     over-sampled generic free-host searches and never reached fee, credential,
     or URL-pattern searches—the strongest discovery signals.
     """
-    groups = ([], [], [], [])
+    groups = ([], [], [], [], [])
     for query in queries:
         if query.startswith("inurl:"):
             groups[3].append(query)
+        elif '("' in query:
+            groups[4].append(query)
         elif query.startswith("site:") and any(
                 token in query for token in (" limit ", " loan", " activation",
                                              " verify", " login")):
@@ -490,15 +543,16 @@ def discover(cfg, limit=20, source="all", brand_keyword=None, dry_run=False):
     
     # Generate search queries
     queries = generate_queries(cfg, brand_keyword)
+    query_plan = select_queries(queries, limit=min(20, len(queries)))
     
     logger.info(f"Generated {len(queries)} search queries")
     
     if dry_run:
-        print(f"\n=== DRY RUN: Would execute {len(queries)} queries ===\n")
-        for i, q in enumerate(queries[:10], 1):
+        print(f"\n=== DRY RUN: Would execute {len(query_plan)} queries ===\n")
+        for i, q in enumerate(query_plan[:10], 1):
             print(f"{i}. {q}")
-        if len(queries) > 10:
-            print(f"... and {len(queries) - 10} more")
+        if len(query_plan) > 10:
+            print(f"... and {len(query_plan) - 10} more")
         return []
     
     # Search based on source type
@@ -506,7 +560,7 @@ def discover(cfg, limit=20, source="all", brand_keyword=None, dry_run=False):
     
     if source in ("all", "search"):
         logger.info("Running search engine queries...")
-        for i, query in enumerate(queries):
+        for i, query in enumerate(query_plan):
             if limit and len(all_findings) >= limit * 2:  # Get extra for filtering
                 break
                 

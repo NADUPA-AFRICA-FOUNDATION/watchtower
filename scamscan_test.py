@@ -151,18 +151,27 @@ def main():
                                   CFG)["infrastructure_flags"])
 
     print("\nOSINT candidate quality")
+    generated = osint_discovery.generate_queries(CFG, "fuliza")
+    lexicon_queries = [q for q in generated if '("' in q]
+    ok &= check("sourced lexicon phrases drive OSINT searches",
+                lexicon_queries
+                and any("namba ya siri" in q for q in lexicon_queries)
+                and not any("increase your limit" in q for q in lexicon_queries)
+                and not any("*locked*" in q for q in lexicon_queries))
     chosen = select_queries([
         'site:vercel.app "fuliza"',
         'site:netlify.app "fuliza"',
         'site:vercel.app "fuliza" loan',
         '"fuliza" "processing fee"',
         'inurl:fuliza inurl:login',
+        '"fuliza" ("namba ya siri")',
     ])
     ok &= check("query budget covers each discovery family",
                 any(q.startswith("site:") and q.endswith('"fuliza"') for q in chosen)
                 and any(" loan" in q for q in chosen)
                 and any("processing fee" in q for q in chosen)
-                and any(q.startswith("inurl:") for q in chosen))
+                and any(q.startswith("inurl:") for q in chosen)
+                and any('(\"namba ya siri\")' in q for q in chosen))
     snippet_score = evaluate_url("https://offers.example", "Fuliza offer",
                                  "Pay a processing fee to activate", CFG)
     ok &= check("search snippets contribute to OSINT risk ratings",
