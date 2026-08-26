@@ -14,6 +14,7 @@ Usage:
 """
 
 import argparse
+import copy
 import json
 import logging
 import re
@@ -106,6 +107,10 @@ SEARCH_TEMPLATES = [
 CT_SEARCH_URL = "https://crt.sh/?q=%.{domain}&output=json"
 
 
+class DiscoveryError(RuntimeError):
+    """A search could not run; distinct from a successful zero-result search."""
+
+
 def generate_queries(cfg, brand_keyword=None):
     """Generate search queries based on brand aliases and search templates."""
     brand = cfg.get("brand", {})
@@ -151,11 +156,39 @@ def generate_queries(cfg, brand_keyword=None):
     return queries
 
 
+def select_queries(queries, limit=8):
+    """Choose a small but diverse set instead of only the first host dorks.
+
+    ``generate_queries`` is grouped by template.  Taking its first few entries
+    over-sampled generic free-host searches and never reached fee, credential,
+    or URL-pattern searches—the strongest discovery signals.
+    """
+    groups = ([], [], [], [])
+    for query in queries:
+        if query.startswith("inurl:"):
+            groups[3].append(query)
+        elif query.startswith("site:") and any(
+                token in query for token in (" limit ", " loan", " activation",
+                                             " verify", " login")):
+            groups[1].append(query)
+        elif query.startswith("site:"):
+            groups[0].append(query)
+        else:
+            groups[2].append(query)
+
+    selected = []
+    while len(selected) < limit and any(groups):
+        for group in groups:
+            if group and len(selected) < limit:
+                selected.append(group.pop(0))
+    return selected
+
+
 def search_duckduckgo(query, max_results=10):
     """Search DuckDuckGo and return results."""
     if DDGS is None:
-        logger.warning("duckduckgo-search not installed. Run: pip install duckduckgo-search")
-        return []
+        raise DiscoveryError(
+            "DuckDuckGo search is unavailable; install the 'ddgs' dependency")
     
     try:
         results = []
@@ -184,8 +217,7 @@ def search_duckduckgo(query, max_results=10):
         
         return results
     except Exception as e:
-        logger.error(f"DuckDuckGo search failed for query '{query}': {e}")
-        return []
+        raise DiscoveryError(f"DuckDuckGo search failed for query {query!r}: {e}") from e
 
 
 def check_certificate_transparency(domain_pattern, max_results=20, official_domains=None):
@@ -372,15 +404,29 @@ def discover_and_score(brand, limit, cfg):
     seen_urls = set()
     
     # Generate queries for this brand
-    brand_cfg = cfg.copy()
+    # This endpoint is called repeatedly by the UI.  A shallow copy used to
+    # mutate the cached application config, leaking one scan's brand into every
+    # later scan and making ratings depend on request order.
+    brand_cfg = copy.deepcopy(cfg)
     brand_cfg["brand"]["name"] = brand
-    brand_cfg["brand"]["aliases"] = [brand] + cfg["brand"].get("aliases", [])
+    brand_cfg["brand"]["aliases"] = list(dict.fromkeys(
+        [brand] + cfg["brand"].get("aliases", [])))
     
     queries = generate_queries(brand_cfg, brand_keyword=brand)
     
-    # Search DuckDuckGo
-    for query in queries[:3]:  # Limit queries for speed
-        search_results = search_duckduckgo(query, max_results=limit)
+    # Search across hosting, scam-copy and URL-pattern query families.  Gather
+    # more candidates than requested because ranking happens after dedupe.
+    failures = []
+    searched = 0
+    candidate_cap = max(limit * 4, limit)
+    for query in select_queries(queries):
+        try:
+            search_results = search_duckduckgo(
+                query, max_results=min(limit * 2, 20))
+            searched += 1
+        except DiscoveryError as exc:
+            failures.append(str(exc))
+            continue
         
         for result in search_results:
             url = result.get('url', '')
@@ -403,28 +449,38 @@ def discover_and_score(brand, limit, cfg):
             
             # Evaluate the URL
             title = result.get('title', '')
-            summary = result.get('description', '')
+            # search_duckduckgo normalises snippets under ``summary``.  Reading
+            # the nonexistent ``description`` key discarded nearly all content
+            # evidence and left the URL alone to determine the rating.
+            summary = result.get('summary', '')
             
             scored = evaluate_url(url, title, summary, brand_cfg)
             
             results.append({
                 "url": url,
                 "title": title,
+                "summary": summary,
                 "score": scored.get("score", 0),
                 "scam_type": scored.get("scam_type", "unknown"),
-                "source": "duckduckgo"
+                "source": result.get("source", "duckduckgo"),
+                "query": query,
+                "breakdown": scored,
             })
             
-            if len(results) >= limit:
+            if len(results) >= candidate_cap:
                 break
         
-        if len(results) >= limit:
+        if len(results) >= candidate_cap:
             break
+
+    if not searched:
+        raise DiscoveryError(
+            "No OSINT query could be searched. " + "; ".join(failures[:3]))
     
     # Sort by score descending
     results.sort(key=lambda x: x["score"], reverse=True)
     
-    return results
+    return results[:limit]
 
 
 def discover(cfg, limit=20, source="all", brand_keyword=None, dry_run=False):

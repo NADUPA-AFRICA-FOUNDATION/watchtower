@@ -69,6 +69,13 @@ def main():
     ok &= check("index serves", r.status_code == 200 and "Watchtower" in r.text)
     ok &= check("stylesheet serves", client.get("/style.css").status_code == 200)
     ok &= check("script serves", client.get("/app.js").status_code == 200)
+    ok &= check("OpenSanctions has a visible screening section",
+                'id="sanctions-section"' in r.text
+                and 'id="sanctions-source"' in r.text)
+    ok &= check("site discovery is a first-class view",
+                'data-view="discover"' in r.text
+                and 'id="discover-form"' in r.text
+                and 'id="discover-results"' in r.text)
 
     r = client.get("/api/sources")
     body = r.json()
@@ -100,6 +107,11 @@ def main():
                 client.get("/api/sweep?q=a").status_code == 422)
     ok &= check("rejects an absurd window",
                 client.get("/api/sweep?q=test&hours=999999").status_code == 422)
+    ok &= check("discovery rejects an empty brand",
+                client.post("/api/discover", json={"brand": ""}).status_code == 400)
+    ok &= check("discovery rejects a malformed limit",
+                client.post("/api/discover",
+                            json={"brand": "fuliza", "limit": "many"}).status_code == 400)
     ok &= check("blocks path traversal on reports",
                 client.get("/api/report/../config.yaml").status_code == 404)
     r = client.get("/api/archive?q=AND OR")

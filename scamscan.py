@@ -34,6 +34,7 @@ import sqlite3
 import sys
 import time
 import unicodedata
+from urllib.parse import urlparse
 from datetime import datetime, timezone
 
 try:
@@ -165,9 +166,28 @@ def registrable(host):
     return ".".join(parts[-2:]) if len(parts) >= 2 else host
 
 
+def url_host(url):
+    """Return a normalised hostname from either a URL or a bare host.
+
+    Analysts commonly paste ``example.test/path`` rather than a fully qualified
+    URL.  ``urlparse`` treats that as a path, which previously made the
+    infrastructure rating depend on whether the user happened to include
+    ``https://``.
+    """
+    value = (url or "").strip()
+    parsed = urlparse(value if "://" in value else "//" + value)
+    return (parsed.hostname or "").lower().rstrip(".")
+
+
+def host_is(host, domain):
+    """True when *host* is *domain* or one of its subdomains."""
+    host, domain = (host or "").lower().rstrip("."), domain.lower().rstrip(".")
+    return host == domain or host.endswith("." + domain)
+
+
 def impersonation_score(url, brand):
     """0-100. High when a non-official host looks like an official one."""
-    host = re.sub(r"^https?://", "", url or "").split("/")[0]
+    host = url_host(url)
     domain = registrable(host)
     if domain in {registrable(d) for d in brand["official_domains"]}:
         return 0, "official domain"
@@ -179,7 +199,17 @@ def impersonation_score(url, brand):
         if r > best:
             best, matched = r, official
 
-    label_hits = [a for a in brand["aliases"] if fold(a) and fold(a) in fold(host)]
+    # Match inside individual DNS labels so punctuation-separated bait such as
+    # ``mpesa-verify`` is retained.  Very short aliases (for example ``saf``
+    # and ``kcb``) must occupy a whole label: substring matching made unrelated
+    # hosts such as ``safari.example`` look like brand impersonation.
+    labels = [fold(label) for label in host.split(".") if fold(label)]
+    label_hits = []
+    for alias in brand["aliases"]:
+        needle = fold(alias)
+        if needle and any(needle == label if len(needle) <= 3 else needle in label
+                          for label in labels):
+            label_hits.append(alias)
 
     score = 0
     reason = []
@@ -318,13 +348,12 @@ def score_finding(finding, cfg):
     # CRITICAL FIX: Strong signals should not be diluted by absent signals
     # If impersonation is high (>=70), this indicates brand abuse regardless of content
     # If we have strong impersonation + suspicious infrastructure, boost the score
-    from urllib.parse import urlparse
     url = finding.get("url", "")
-    host = urlparse(url).netloc.lower() if url else ""
+    host = url_host(url)
     
     # Free hosting platforms commonly used for scams
     free_hosts = ["vercel.app", "netlify.app", "firebaseapp.com", "web.app", "pages.dev", "github.io"]
-    on_free_host = any(fh in host for fh in free_hosts)
+    on_free_host = any(host_is(host, fh) for fh in free_hosts)
     
     # Boost score when impersonation is strong AND on suspicious infrastructure
     if imp >= 70 and on_free_host:

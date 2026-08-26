@@ -109,6 +109,24 @@ button { font-family: inherit; cursor: pointer; }
 
 main { max-width: 1080px; margin: 0 auto; padding: 32px 24px 80px; }
 
+.view-head {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 24px;
+  margin-bottom: 18px;
+}
+.view-head h1 { margin: 2px 0 4px; font-family: var(--mono); font-size: 24px; }
+.view-head p { margin: 0; max-width: 680px; color: var(--muted); }
+.eyebrow, .method-badge {
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: .12em;
+  text-transform: uppercase;
+  color: var(--faint);
+}
+.method-badge { border: 1px solid var(--rule); padding: 4px 7px; white-space: nowrap; }
+
 /* -------------------------------------------------------------- console */
 
 .console {
@@ -160,6 +178,30 @@ main { max-width: 1080px; margin: 0 auto; padding: 32px 24px 80px; }
 .field button:hover { background: #1D2C38; }
 .field button[disabled] { background: var(--faint); border-color: var(--faint);
   cursor: progress; }
+
+.field-with-limit { align-items: stretch; }
+.compact-field {
+  display: grid;
+  grid-template-columns: auto 72px;
+  align-items: center;
+  gap: 8px;
+  padding-left: 12px;
+  border-left: 1px solid var(--rule);
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+  color: var(--faint);
+}
+.compact-field input { width: 72px; padding: 10px; font-size: 14px; }
+.compact-trace { padding-bottom: 12px; }
+.candidate-note {
+  margin: 12px 0 0;
+  padding-top: 10px;
+  border-top: 1px solid var(--rule);
+  color: var(--muted);
+  font-size: 12px;
+}
 
 .hint { margin: 10px 0 0; font-size: 13px; color: var(--muted); }
 
@@ -552,6 +594,16 @@ textarea#score-text:focus { border-color: var(--low); outline: none;
   box-shadow: 0 0 0 3px rgba(70, 116, 143, .14); }
 textarea#score-text::placeholder { color: var(--faint); }
 
+.sanctions-control {
+  border-left: 3px solid var(--med);
+  padding-left: 12px;
+}
+
+.sanctions-control .source-note {
+  margin: 8px 0 0;
+  max-width: 34rem;
+}
+
 /* ---------------------------------------------------------- hunt log */
 
 .hunt-log {
@@ -684,7 +736,13 @@ textarea#score-text::placeholder { color: var(--faint); }
   .field input { font-size: 16px; }  /* stops iOS zooming on focus */
   .lane { grid-template-columns: 88px 1fr 34px; }
   .rail { padding: 0 14px; }
+  .rail { height: auto; min-height: 52px; align-items: flex-start; padding-top: 10px; padding-bottom: 10px; }
+  .rail-nav { flex-wrap: wrap; margin-left: 8px; }
+  .side-group { flex-wrap: wrap; }
   .rail-status { display: none; }
+  .view-head { align-items: flex-start; }
+  .method-badge { display: none; }
+  .compact-field { border-left: 0; padding-left: 0; }
   .fam { grid-template-columns: 88px 1fr 50px; font-size: 10px; }
   textarea#score-text { font-size: 16px; }
 }
