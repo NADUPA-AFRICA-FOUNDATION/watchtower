@@ -317,6 +317,14 @@ def lexicon_score(text, lexicon, counter_terms=None):
 
 
 def score_finding(finding, cfg):
+    """Assess risk from validated evidence, never from discovery metadata.
+
+    Callers must explicitly mark remotely collected material as validated. Text
+    supplied directly to the offline scorer is considered validated input.
+    """
+    if finding.get("validation_status") == "unavailable":
+        return {"risk_score": None, "risk_evidence": {}, "scored_on": []}
+
     brand, sc = cfg["brand"], cfg["scoring"]
     blob = " ".join(
         str(finding.get(k, "")) for k in ("title", "summary", "quoted_evidence", "url")
@@ -327,23 +335,15 @@ def score_finding(finding, cfg):
     art = min(sum(sc["artifact_points"].get(k, 5) for k in artifacts), 100)
     imp, imp_reason = impersonation_score(finding.get("url", ""), brand)
 
-    families = {"lexicon": lex, "artifact": art, "impersonation": imp}
-
-    # Only average over families that actually reported. Treating an absent
-    # model_confidence as 0.0 is a silent penalty, not a low score: with four
-    # equal weights it costs a flat 25 points, so a finding scoring 100 on
-    # every local family lands at 75 — under auto_escalate_threshold. A field
-    # the model forgot to emit must not quietly demote a real escalation.
+    # Model confidence is retained as provenance, but it never enters risk.
+    # Risk is derived exclusively from the five validated evidence families.
     raw_conf = finding.get("model_confidence")
+    model_score = None
     if raw_conf is not None:
         try:
-            families["model"] = max(0.0, min(1.0, float(raw_conf))) * 100
+            model_score = max(0.0, min(1.0, float(raw_conf))) * 100
         except (TypeError, ValueError):
             pass
-
-    w = sc["weights"]
-    denom = sum(w.get(k, 0) for k in families) or 1
-    total = sum(families[k] * w.get(k, 0) for k in families) / denom
     
     # CRITICAL FIX: Strong signals should not be diluted by absent signals
     # If impersonation is high (>=70), this indicates brand abuse regardless of content
@@ -354,6 +354,16 @@ def score_finding(finding, cfg):
     # Free hosting platforms commonly used for scams
     free_hosts = ["vercel.app", "netlify.app", "firebaseapp.com", "web.app", "pages.dev", "github.io"]
     on_free_host = any(host_is(host, fh) for fh in free_hosts)
+    risk_evidence = {
+        "identity": imp,
+        "content": max(lex, art),
+        "infrastructure": 100 if on_free_host else 0,
+        "reputation": max(0, min(100, finding.get("reputation_score", 0) or 0)),
+        "campaign": max(0, min(100, finding.get("campaign_score", 0) or 0)),
+    }
+    weights = {"identity": .30, "content": .30, "infrastructure": .15,
+               "reputation": .15, "campaign": .10}
+    total = sum(risk_evidence[k] * weights[k] for k in risk_evidence)
     
     # Boost score when impersonation is strong AND on suspicious infrastructure
     if imp >= 70 and on_free_host:
@@ -371,17 +381,19 @@ def score_finding(finding, cfg):
     
     total = min(100, total)
 
+    risk_score = round(total, 1)
     return {
-        "score": round(total, 1),
+        "risk_score": risk_score,
         "lexicon_score": lex,
         "artifact_score": art,
         "impersonation_score": imp,
-        "model_score": round(families["model"], 1) if "model" in families else None,
-        "scored_on": sorted(families),
+        "model_score": round(model_score, 1) if model_score is not None else None,
+        "scored_on": sorted(risk_evidence),
         "artifacts": artifacts,
         "lexicon_hits": lex_hits[:12],
         "impersonation_reason": imp_reason,
         "infrastructure_flags": {"on_free_host": on_free_host} if on_free_host else {},
+        "risk_evidence": risk_evidence,
     }
 
 
@@ -404,12 +416,31 @@ def db_connect(path=DB_PATH):
             evidence    TEXT,
             scam_type   TEXT,
             query       TEXT,
-            score       REAL,
+            discovery_priority REAL,
+            risk_score  REAL,
+            validation_status TEXT DEFAULT 'unavailable',
+            evidence_coverage REAL DEFAULT 0,
             breakdown   TEXT,
             disposition TEXT DEFAULT 'new',
             analyst_note TEXT
         )"""
     )
+    # Additive migration for databases created by earlier releases.
+    existing = {row[1] for row in con.execute("PRAGMA table_info(findings)")}
+    migrations = {
+        "discovery_priority": "REAL",
+        "risk_score": "REAL",
+        "validation_status": "TEXT DEFAULT 'unavailable'",
+        "evidence_coverage": "REAL DEFAULT 0",
+    }
+    for name, declaration in migrations.items():
+        if name not in existing:
+            con.execute(f"ALTER TABLE findings ADD COLUMN {name} {declaration}")
+    # Existing scores were produced from evidence-bearing findings.
+    if "score" in existing:
+        con.execute("""UPDATE findings SET risk_score=score,
+                       validation_status='validated'
+                       WHERE risk_score IS NULL AND score IS NOT NULL""")
     con.commit()
     return con
 
@@ -428,15 +459,21 @@ def upsert(con, finding, scored, query):
     row = con.execute("SELECT times_seen FROM findings WHERE fingerprint=?", (fp,)).fetchone()
     if row:
         con.execute(
-            "UPDATE findings SET last_seen=?, times_seen=?, score=? WHERE fingerprint=?",
-            (now, row[0] + 1, scored["score"], fp),
+            """UPDATE findings SET last_seen=?, times_seen=?,
+               risk_score=?, discovery_priority=?, validation_status=?,
+               evidence_coverage=? WHERE fingerprint=?""",
+            (now, row[0] + 1, scored.get("risk_score"),
+             finding.get("discovery_priority"),
+             finding.get("validation_status", "validated"),
+             finding.get("evidence_coverage", 0), fp),
         )
         return False
     con.execute(
         """INSERT INTO findings
            (fingerprint, first_seen, last_seen, url, title, summary, evidence,
-            scam_type, query, score, breakdown)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+            scam_type, query, discovery_priority, risk_score,
+            validation_status, evidence_coverage, breakdown)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (
             fp, now, now,
             finding.get("url", ""),
@@ -445,11 +482,34 @@ def upsert(con, finding, scored, query):
             finding.get("quoted_evidence", ""),
             finding.get("scam_type", "unknown"),
             query,
-            scored["score"],
+            finding.get("discovery_priority"),
+            scored.get("risk_score"),
+            finding.get("validation_status", "validated"),
+            finding.get("evidence_coverage", 0),
             json.dumps(scored),
         ),
     )
     return True
+
+
+def discovery_priority(finding, query, reuse_count=0):
+    """Discovery confidence only; none of these signals establish site risk."""
+    source = str(finding.get("source", "web_search"))
+    source_points = {"certificate_transparency": 18, "web_search": 14,
+                     "duckduckgo": 12}.get(source, 8)
+    q = (query or "").lower()
+    family_points = (20 if "inurl:" in q else 18 if any(
+        token in q for token in ("verify", "login", "activation", "loan")) else 12)
+    imp, _ = impersonation_score(finding.get("url", ""), {
+        **finding.get("brand", {}),
+        "official_domains": finding.get("brand", {}).get("official_domains", []),
+        "aliases": finding.get("brand", {}).get("aliases", []),
+    }) if finding.get("brand") else (0, "")
+    blob = " ".join(str(finding.get(k, "")) for k in ("title", "summary"))
+    promotion = 15 if re.search(r"loan|limit|boost|offer|activate|verify|login", blob, re.I) else 0
+    recency = 7 if finding.get("published_at") else 2
+    return min(100, source_points + family_points + round(imp * .25) +
+               promotion + recency + min(10, reuse_count * 3))
 
 
 # --------------------------------------------------------------------------
@@ -1044,14 +1104,20 @@ def hunt(client, cfg, con, topics=None, progress=None, state=None, dry_run=False
             summary["queries_run"] += 1
 
             for f in findings:
+                f["brand"] = cfg["brand"]
+                f["discovery_priority"] = discovery_priority(f, q)
+                f["validation_status"] = "validated"
+                present = sum(bool(f.get(k)) for k in
+                              ("url", "quoted_evidence", "model_confidence"))
+                f["evidence_coverage"] = round(present / 5, 2)
                 scored = score_finding(f, cfg)
                 is_new = upsert(con, f, scored, q)
                 summary["seen"] += 1
                 summary["new"] += is_new
-                escalate = scored["score"] >= cfg["scoring"]["auto_escalate_threshold"]
+                escalate = scored["risk_score"] >= cfg["scoring"]["auto_escalate_threshold"]
                 summary["escalated"] += bool(escalate)
                 progress({"type": "finding", "new": bool(is_new),
-                          "escalate": bool(escalate), "score": scored["score"],
+                          "escalate": bool(escalate), "risk_score": scored["risk_score"],
                           "url": f.get("url", ""), "title": f.get("title", ""),
                           "scam_type": f.get("scam_type", "unknown"),
                           "fingerprint": fingerprint(f)})
@@ -1100,7 +1166,7 @@ def cmd_hunt(args):
         elif kind == "finding":
             flag = "NEW " if e["new"] else "dup "
             print(f"    {flag}{'!!' if e['escalate'] else '  '} "
-                  f"{e['score']:>5.1f}  {e['url'][:70]}")
+                  f"risk {e['risk_score']:>5.1f}  {e['url'][:70]}")
 
     summary = hunt(client, cfg, con, args.topics, render, dry_run=args.dry_run)
 
@@ -1134,10 +1200,10 @@ def cmd_hunt(args):
 def cmd_queue(args):
     con = db_connect(args.db)
     rows = con.execute(
-        """SELECT score, scam_type, url, summary, times_seen, disposition
-           FROM findings WHERE score >= ? AND disposition = 'new'
-           ORDER BY score DESC LIMIT ?""",
-        (args.min_score, args.limit),
+        """SELECT risk_score, scam_type, url, summary, times_seen, disposition
+           FROM findings WHERE risk_score >= ? AND disposition = 'new'
+           ORDER BY risk_score DESC LIMIT ?""",
+        (args.min_risk_score, args.limit),
     ).fetchall()
     if not rows:
         print("Queue empty.")
@@ -1150,8 +1216,13 @@ def cmd_queue(args):
 
 def cmd_export(args):
     con = db_connect(args.db)
-    cur = con.execute("SELECT * FROM findings WHERE score >= ? ORDER BY score DESC",
-                      (args.min_score,))
+    cur = con.execute(
+        """SELECT fingerprint, first_seen, last_seen, times_seen, url, title,
+                  summary, evidence, scam_type, query, discovery_priority,
+                  risk_score, validation_status, evidence_coverage, breakdown,
+                  disposition, analyst_note
+           FROM findings WHERE risk_score >= ? ORDER BY risk_score DESC""",
+        (args.min_risk_score,))
     cols = [d[0] for d in cur.description]
     with open(args.out, "w", newline="", encoding="utf-8") as fh:
         w = csv.writer(fh)
@@ -1327,13 +1398,13 @@ def main():
     h.set_defaults(func=cmd_hunt)
 
     q = sub.add_parser("queue", help="show the review queue")
-    q.add_argument("--min-score", type=float, default=45)
+    q.add_argument("--min-risk-score", type=float, default=45)
     q.add_argument("--limit", type=int, default=25)
     q.set_defaults(func=cmd_queue)
 
     e = sub.add_parser("export", help="export findings to CSV")
     e.add_argument("--out", default="queue.csv")
-    e.add_argument("--min-score", type=float, default=0)
+    e.add_argument("--min-risk-score", type=float, default=0)
     e.set_defaults(func=cmd_export)
 
     d = sub.add_parser("dispose", help="record an analyst verdict")

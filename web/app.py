@@ -364,7 +364,7 @@ def scamscan_status():
 
 @app.get("/api/scamscan/queue")
 def scamscan_queue(
-    min_score: float = Query(0, ge=0, le=100),
+    min_risk_score: float = Query(0, ge=0, le=100),
     disposition: str = Query("new"),
     limit: int = Query(50, ge=1, le=200),
 ):
@@ -373,14 +373,15 @@ def scamscan_queue(
     if disposition not in allowed:
         raise HTTPException(400, f"disposition must be one of {sorted(allowed)}")
 
-    sql = ("SELECT fingerprint, score, scam_type, url, title, summary, evidence, "
-           "times_seen, disposition, analyst_note, first_seen, last_seen, breakdown "
-           "FROM findings WHERE score >= ?")
-    params = [min_score]
+    sql = ("SELECT fingerprint, discovery_priority, risk_score, validation_status, "
+           "evidence_coverage, scam_type, url, title, summary, evidence, times_seen, "
+           "disposition, analyst_note, first_seen, last_seen, breakdown "
+           "FROM findings WHERE risk_score >= ?")
+    params = [min_risk_score]
     if disposition != "all":
         sql += " AND disposition = ?"
         params.append(disposition)
-    sql += " ORDER BY score DESC LIMIT ?"
+    sql += " ORDER BY risk_score DESC LIMIT ?"
     params.append(limit)
 
     con = scamscan.db_connect(str(data_path("scamscan.db")))
@@ -390,14 +391,17 @@ def scamscan_queue(
         con.close()
 
     items = []
-    for (fp, score, stype, url, title, summary, evidence, seen, disp, note,
+    for (fp, priority, risk, validation, coverage, stype, url, title, summary,
+         evidence, seen, disp, note,
          first, last, breakdown) in rows:
         try:
             detail = json.loads(breakdown or "{}")
         except json.JSONDecodeError:
             detail = {}
         items.append({
-            "fingerprint": fp, "score": score, "band": scam_band(score or 0, cfg),
+            "fingerprint": fp, "discovery_priority": priority,
+            "risk_score": risk, "band": scam_band(risk or 0, cfg),
+            "validation_status": validation, "evidence_coverage": coverage,
             "scam_type": stype, "url": url, "title": title, "summary": summary,
             "evidence": evidence, "times_seen": seen, "disposition": disp,
             "analyst_note": note, "first_seen": first, "last_seen": last,
@@ -449,9 +453,13 @@ def scamscan_score(payload: dict = Body(...)):
         finding["model_confidence"] = raw
 
     scored = scamscan.score_finding(finding, cfg)
+    scored["validation_status"] = "validated"
+    scored["evidence_coverage"] = round(sum(bool(scored.get(k)) for k in
+        ("impersonation_score", "lexicon_score", "artifact_score",
+         "infrastructure_flags")) / 5, 2)
     return {
         **scored,
-        "band": scam_band(scored["score"], cfg),
+        "band": scam_band(scored["risk_score"], cfg),
         "review_threshold": cfg["scoring"]["review_threshold"],
         "escalate_threshold": cfg["scoring"]["auto_escalate_threshold"],
     }
@@ -558,12 +566,22 @@ def scan_url(payload: dict = Body(...)):
     # Fetch and analyze the URL using existing scamscan logic
     try:
         finding = osint_discovery.fetch_and_analyze_url(url, cfg)
+        if finding.get("validation_status") != "validated":
+            return {
+                "url": url, "risk_score": None,
+                "validation_status": "unavailable", "evidence_coverage": 0,
+                "classification": "Validation unavailable", "verdict": "UNKNOWN",
+                "findings": ["The site could not be fetched; no risk assessment was made."],
+                "breakdown": {},
+            }
         
         # Check for official domain (INSTANT SAFE)
         if finding.get("_is_official"):
             return {
                 "url": url,
-                "score": 0,
+                "risk_score": 0,
+                "validation_status": "validated",
+                "evidence_coverage": finding.get("evidence_coverage", 0),
                 "classification": "SAFE",
                 "verdict": "VERIFIED_OFFICIAL",
                 "findings": [f"Verified official domain ({finding.get('_official_domain')})"],
@@ -574,7 +592,9 @@ def scan_url(payload: dict = Body(...)):
         if finding.get("_smoking_gun"):
             return {
                 "url": url,
-                "score": 100,
+                "risk_score": 100,
+                "validation_status": "validated",
+                "evidence_coverage": finding.get("evidence_coverage", 0),
                 "classification": "ADVANCE_FEE_SCAM",
                 "verdict": "CONFIRMED_SCAM",
                 "findings": [finding["_smoking_gun_reason"]],
@@ -610,7 +630,7 @@ def scan_url(payload: dict = Body(...)):
         
         # Determine verdict based on score with improved thresholds
         # Using evidence-based categories instead of simple thresholds
-        score = scored["score"]
+        score = scored["risk_score"]
         imp_score = scored.get("impersonation_score", 0)
         
         # Verdict logic based on evidence strength
@@ -632,7 +652,9 @@ def scan_url(payload: dict = Body(...)):
         
         return {
             "url": url,
-            "score": score,
+            "risk_score": score,
+            "validation_status": finding.get("validation_status", "validated"),
+            "evidence_coverage": finding.get("evidence_coverage", 0),
             "classification": classification,
             "verdict": verdict,
             "findings": findings_list,
@@ -669,23 +691,30 @@ def discover_scams(payload: dict = Body(...)):
         review = cfg.get("scoring", {}).get("review_threshold", 45)
         escalate = cfg.get("scoring", {}).get("auto_escalate_threshold", 80)
         for item in results:
-            score = item.get("score", 0)
-            if score >= escalate:
+            risk = item.get("risk_score")
+            if risk is None:
+                classification = "Validation unavailable"
+            elif risk >= escalate:
                 classification = "High risk"
-            elif score >= review:
+            elif risk >= review:
                 classification = "Needs review"
             else:
                 classification = "Weak signal"
             formatted_results.append({
                 "url": item.get("url", ""),
                 "brand": brand,
-                "score": score,
+                "discovery_priority": item.get("discovery_priority", 0),
+                "risk_score": risk,
+                "validation_status": item.get("validation_status", "unavailable"),
+                "evidence_coverage": item.get("evidence_coverage", 0),
                 "classification": classification,
                 "title": item.get("title", ""),
                 "summary": item.get("summary", ""),
                 "source": item.get("source", "duckduckgo"),
                 "findings": [
-                    f"Score: {score:.1f}/100",
+                    f"Discovery priority: {item.get('discovery_priority', 0):.1f}/100",
+                    (f"Validated risk: {risk:.1f}/100" if risk is not None
+                     else "Validated risk: unavailable"),
                     f"Found via: {item.get('source', 'search')}",
                 ],
                 "breakdown": item.get("breakdown", {}),
@@ -732,13 +761,16 @@ async def discover_scams_experimental(payload: dict = Body(...)):
             scored_results.append({
                 'url': url,
                 'brand': brand,
-                'score': item.get('confidence', 0) * 100,
+                'discovery_priority': item.get('confidence', 0) * 100,
+                'risk_score': None,
+                'validation_status': 'unavailable',
+                'evidence_coverage': 0,
                 'title': item.get('title', ''),
                 'source': item.get('source', 'unknown'),
                 'confidence': item.get('confidence', 0)
             })
         
-        scored_results.sort(key=lambda x: x['score'], reverse=True)
+        scored_results.sort(key=lambda x: x['discovery_priority'], reverse=True)
         
         return {
             'results': scored_results[:limit],

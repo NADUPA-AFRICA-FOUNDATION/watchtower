@@ -35,7 +35,7 @@ except ImportError:
 from scamscan import (
     load_env, score_finding, db_connect, upsert, 
     impersonation_score, extract_artifacts, lexicon_score,
-    registrable
+    registrable, similarity, url_host
 )
 
 load_env()
@@ -312,6 +312,34 @@ def evaluate_url(url, title, summary, cfg):
     return scored
 
 
+def query_family(query):
+    if query.startswith("inurl:"):
+        return "url_pattern"
+    if query.startswith("site:") and any(t in query for t in (" login", " verify", " loan", " activation", " limit")):
+        return "promotion_context"
+    if query.startswith("site:"):
+        return "hosted_site"
+    return "scam_phrase"
+
+
+def discovery_priority(result, query, brand, artifact_reuse=0):
+    """Rank candidate relevance using discovery-only signals (0-100)."""
+    source_points = {"certificate_transparency": 18, "duckduckgo": 12}.get(
+        result.get("source"), 8)
+    family_points = {"url_pattern": 20, "promotion_context": 18,
+                     "scam_phrase": 15, "hosted_site": 10}[query_family(query)]
+    host = registrable(result.get("url", ""))
+    aliases = [brand] if isinstance(brand, str) else brand.get("aliases", [])
+    similarity_points = round(max((similarity(host, a) for a in aliases), default=0) * 25)
+    blob = f"{result.get('title', '')} {result.get('summary', '')}".lower()
+    promotion_points = 15 if re.search(r"loan|limit|boost|offer|activate|verify|login", blob) else 0
+    published = result.get("published_at") or result.get("date")
+    recency_points = 7 if published else 2
+    reuse_points = min(10, artifact_reuse * 3)
+    return min(100, source_points + family_points + similarity_points +
+               promotion_points + recency_points + reuse_points)
+
+
 def fetch_and_analyze_url(url, cfg):
     """Fetch and analyze a single URL for the web API."""
     import re
@@ -329,7 +357,14 @@ def fetch_and_analyze_url(url, cfg):
         
         # Fetch page content - use .get() method which returns FetchResult
         result = fetcher.get(url)
-        html_content = result.html if result.ok else ""
+        if not result.ok:
+            return {
+                "url": url, "title": "", "summary": "",
+                "quoted_evidence": "", "model_confidence": None,
+                "validation_status": "unavailable", "evidence_coverage": 0,
+                "_fetch_error": getattr(result, "error", "fetch failed"),
+            }
+        html_content = result.html
         
         # Extract text from HTML (simple approach)
         from bs4 import BeautifulSoup
@@ -349,6 +384,7 @@ def fetch_and_analyze_url(url, cfg):
             "summary": text,
             "quoted_evidence": text[:2000],
             "model_confidence": None,
+            "validation_status": "validated",
         }
         
         # --- CRITICAL HEURISTICS (Override AI) ---
@@ -385,6 +421,16 @@ def fetch_and_analyze_url(url, cfg):
                 finding["_official_domain"] = official
                 break
         
+        # Coverage is independent of severity: it reports which of the five
+        # risk evidence families were actually observed during validation.
+        coverage = 2  # identity and fetched content are always checked
+        if url_host(url):
+            coverage += 1  # infrastructure
+        if finding.get("reputation_score") is not None:
+            coverage += 1
+        if finding.get("campaign_score") is not None:
+            coverage += 1
+        finding["evidence_coverage"] = round(coverage / 5, 2)
         return finding
         
     except Exception as e:
@@ -395,6 +441,9 @@ def fetch_and_analyze_url(url, cfg):
             "summary": f"Error fetching URL: {str(e)}",
             "quoted_evidence": "",
             "model_confidence": None,
+            "validation_status": "unavailable",
+            "evidence_coverage": 0,
+            "_fetch_error": str(e),
         }
 
 
@@ -402,6 +451,7 @@ def discover_and_score(brand, limit, cfg):
     """Discover scams for a brand and return scored results."""
     results = []
     seen_urls = set()
+    artifact_counts = {}
     
     # Generate queries for this brand
     # This endpoint is called repeatedly by the UI.  A shallow copy used to
@@ -454,13 +504,26 @@ def discover_and_score(brand, limit, cfg):
             # evidence and left the URL alone to determine the rating.
             summary = result.get('summary', '')
             
-            scored = evaluate_url(url, title, summary, brand_cfg)
+            candidate_artifacts = extract_artifacts(f"{title} {summary}")
+            artifact_keys = [f"{kind}:{value}" for kind, values in candidate_artifacts.items()
+                             for value in values]
+            reuse = max((artifact_counts.get(key, 0) for key in artifact_keys), default=0)
+            priority = discovery_priority(result, query, brand_cfg["brand"], reuse)
+            for key in artifact_keys:
+                artifact_counts[key] = artifact_counts.get(key, 0) + 1
+            validated = fetch_and_analyze_url(url, brand_cfg)
+            status = validated.get("validation_status", "unavailable")
+            scored = (score_finding(validated, brand_cfg)
+                      if status == "validated" else {})
             
             results.append({
                 "url": url,
                 "title": title,
                 "summary": summary,
-                "score": scored.get("score", 0),
+                "discovery_priority": priority,
+                "risk_score": scored.get("risk_score"),
+                "validation_status": status,
+                "evidence_coverage": validated.get("evidence_coverage", 0),
                 "scam_type": scored.get("scam_type", "unknown"),
                 "source": result.get("source", "duckduckgo"),
                 "query": query,
@@ -478,7 +541,7 @@ def discover_and_score(brand, limit, cfg):
             "No OSINT query could be searched. " + "; ".join(failures[:3]))
     
     # Sort by score descending
-    results.sort(key=lambda x: x["score"], reverse=True)
+    results.sort(key=lambda x: x["discovery_priority"], reverse=True)
     
     return results[:limit]
 

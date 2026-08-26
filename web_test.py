@@ -273,7 +273,7 @@ def main():
         con.close()
         fp = scamscan.fingerprint(finding)
 
-        d = client.get("/api/scamscan/queue?min_score=0").json()
+        d = client.get("/api/scamscan/queue?min_risk_score=0").json()
         ok &= check("a stored finding comes back", len(d["items"]) == 1)
         item = d["items"][0]
         ok &= check("with a band on the shared relevance ramp",
@@ -281,18 +281,18 @@ def main():
         ok &= check("and the breakdown, so the score can be explained",
                     item["breakdown"]["lexicon_hits"]
                     and "scored_on" in item["breakdown"])
-        ok &= check("min_score filters it out when set above the score",
-                    client.get("/api/scamscan/queue?min_score=99").json()["items"] == [])
+        ok &= check("min_risk_score filters it out when set above validated risk",
+                    client.get("/api/scamscan/queue?min_risk_score=99").json()["items"] == [])
 
         r = client.post("/api/scamscan/dispose",
                         json={"fingerprint": fp, "verdict": "confirmed",
                               "note": "checked"})
         ok &= check("a verdict saves", r.status_code == 200)
-        after = client.get("/api/scamscan/queue?min_score=0&disposition=confirmed").json()
+        after = client.get("/api/scamscan/queue?min_risk_score=0&disposition=confirmed").json()
         ok &= check("and moves the finding out of the new queue",
                     len(after["items"]) == 1
                     and after["items"][0]["analyst_note"] == "checked"
-                    and client.get("/api/scamscan/queue?min_score=0").json()["items"] == [])
+                    and client.get("/api/scamscan/queue?min_risk_score=0").json()["items"] == [])
         ok &= check("an invalid verdict is rejected",
                     client.post("/api/scamscan/dispose",
                                 json={"fingerprint": fp, "verdict": "drop"}
@@ -309,16 +309,17 @@ def main():
                         json={"text": "New M-PESA balance is Ksh(*LOCKED*). Pay to POCHI.",
                               "url": "http://mpesa-verify.co.ke/login"})
         s = r.json()
-        ok &= check("it scores", r.status_code == 200 and s["score"] > 0)
+        ok &= check("it scores", r.status_code == 200 and s["risk_score"] > 0)
         ok &= check("every hit carries the source it came from",
                     all("[" in h for h in s["lexicon_hits"]))
         ok &= check("an absent model confidence is reported as absent, not zero",
                     s["model_score"] is None and "model" not in s["scored_on"])
-        ok &= check("and an explicit one is included",
-                    "model" in client.post("/api/scamscan/score",
-                                           json={"text": "x", "url": "y",
-                                                 "model_confidence": 0.5}
-                                           ).json()["scored_on"])
+        model_result = client.post("/api/scamscan/score",
+                                   json={"text": "x", "url": "y",
+                                         "model_confidence": 0.5}).json()
+        ok &= check("and an explicit one is provenance, not risk evidence",
+                    model_result["model_score"] == 50
+                    and "model" not in model_result["scored_on"])
         ok &= check("an empty request is rejected rather than scored as clean",
                     client.post("/api/scamscan/score",
                                 json={"text": "", "url": ""}).status_code == 400)
