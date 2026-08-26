@@ -112,7 +112,7 @@ $("#window").onclick = (e) => {
 /* Two tools, one front door. The views are independent — nothing on the
    scamscan side reads watchtower's store and vice versa — so switching sides
    is only ever showing and hiding, never a state handover. */
-const VIEWS = ["sweep", "archive", "queue", "score"];
+const VIEWS = ["sweep", "archive", "discover", "queue", "score"];
 
 document.querySelectorAll(".tab").forEach((tab) => {
   tab.onclick = () => {
@@ -564,6 +564,96 @@ function hitList(hits) {
     box.append(chip);
   });
   return box;
+}
+
+/* ------------------------------------------------------------- discover */
+
+$("#discover-form").onsubmit = async (e) => {
+  e.preventDefault();
+  const brand = $("#discover-brand").value.trim();
+  const limit = Math.max(1, Math.min(20, Number($("#discover-limit").value) || 10));
+  const button = $("#discover-go");
+  const trace = $("#discover-trace");
+  const stage = $("#discover-stage");
+  const out = $("#discover-results");
+
+  button.disabled = true;
+  button.textContent = "Searching";
+  trace.hidden = false;
+  stage.textContent = `looking for ${brand}`;
+  $("#discover-summary").replaceChildren();
+  out.replaceChildren();
+
+  try {
+    const r = await fetch("/api/discover", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ brand, limit }),
+    });
+    const d = await r.json();
+    if (!r.ok) {
+      out.replaceChildren(el("p", "errs", d.detail || "Discovery could not run."));
+      stage.textContent = "incomplete";
+      return;
+    }
+
+    stage.textContent = `${d.count} candidate${d.count === 1 ? "" : "s"}`;
+    const summary = $("#discover-summary");
+    summary.append(el("span", null,
+      `${d.count} ranked candidate${d.count === 1 ? "" : "s"}`));
+    summary.append(el("span", "warn", "review before acting"));
+    if (!d.results.length) {
+      const empty = el("div", "empty-inline");
+      empty.append(el("h3", null, "No candidates returned"),
+        el("p", null, "This only describes this search run; it does not establish that the brand is clean."));
+      out.replaceChildren(empty);
+    } else {
+      out.replaceChildren(...d.results.map(discoveryCard));
+    }
+  } catch {
+    stage.textContent = "incomplete";
+    out.replaceChildren(el("p", "errs", "Could not reach the discovery service."));
+  } finally {
+    button.disabled = false;
+    button.textContent = "Discover";
+  }
+};
+
+function discoveryCard(item) {
+  const c = el("article", "card");
+  const band = item.score >= 80 ? "HIGH" : item.score >= 45 ? "MED"
+    : item.score >= 20 ? "LOW" : "WEAK";
+  c.style.setProperty("--band", BAND_COLOUR[band]);
+
+  const top = el("div", "card-top");
+  top.append(gauge(band), el("span", "score", Math.round(item.score || 0)),
+    el("span", "flag", item.classification || "candidate"));
+  c.append(top);
+
+  const h = el("h3");
+  const a = el("a", null, item.title || item.url || "(untitled candidate)");
+  a.href = item.url;
+  a.target = "_blank";
+  a.rel = "noopener noreferrer";
+  h.append(a);
+  c.append(h);
+
+  const meta = el("p", "card-meta");
+  meta.append(el("span", null, item.brand || "brand"),
+    el("span", null, item.source || "search"));
+  try { meta.append(el("span", null, new URL(item.url).hostname)); } catch {}
+  c.append(meta);
+  if (item.summary) c.append(el("p", "body", item.summary.slice(0, 320)));
+
+  const b = item.breakdown || {};
+  c.append(familyBars(b));
+  if (b.lexicon_hits?.length) c.append(hitList(b.lexicon_hits));
+  if (b.impersonation_reason) {
+    c.append(el("p", "reason", `host: ${b.impersonation_reason}`));
+  }
+  c.append(el("p", "candidate-note",
+    "Candidate only — confirm against the live page and independent evidence."));
+  return c;
 }
 
 function queueCard(item) {

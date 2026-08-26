@@ -27,6 +27,7 @@
     </div>
     <div class="side-group" data-side="scamscan">
       <span class="side-label">scamscan</span>
+      <button class="tab" data-view="discover" data-side="scamscan">Discover</button>
       <button class="tab" data-view="queue" data-side="scamscan">Queue</button>
       <button class="tab" data-view="score" data-side="scamscan">Score</button>
     </div>
@@ -130,6 +131,44 @@
     </p>
   </form>
   <div class="findings" id="archive-results"></div>
+</section>
+
+<!-- ========================== DISCOVER ========================== -->
+<section id="view-discover" hidden>
+  <header class="view-head">
+    <div>
+      <span class="eyebrow">ScamScan / OSINT</span>
+      <h1>Discover impersonating sites</h1>
+      <p>Search public indexes for candidate sites, then rank the evidence already visible in their search results.</p>
+    </div>
+    <span class="method-badge">search evidence</span>
+  </header>
+
+  <form class="console" id="discover-form" autocomplete="off">
+    <label class="field-label" for="discover-brand">Brand or product to investigate</label>
+    <div class="field field-with-limit">
+      <input id="discover-brand" type="text" spellcheck="false"
+             minlength="2" maxlength="80" placeholder="Fuliza" required>
+      <label class="compact-field" for="discover-limit">
+        <span>Results</span>
+        <input id="discover-limit" type="number" min="1" max="20" value="10">
+      </label>
+      <button type="submit" id="discover-go">Discover</button>
+    </div>
+    <p class="hint">
+      Candidates are search leads, not confirmed scams. Open a result and review
+      its evidence before changing an analyst disposition.
+    </p>
+  </form>
+
+  <section class="trace compact-trace" id="discover-trace" hidden aria-live="polite">
+    <div class="trace-head">
+      <span class="trace-title">Discovery run</span>
+      <span class="trace-stage" id="discover-stage"></span>
+    </div>
+  </section>
+  <div class="summary" id="discover-summary"></div>
+  <div class="findings" id="discover-results"></div>
 </section>
 
 <!-- ============================ QUEUE ============================ -->
