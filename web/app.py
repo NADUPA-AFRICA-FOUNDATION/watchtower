@@ -662,7 +662,8 @@ def discover_scams(payload: dict = Body(...)):
     
     try:
         # Use the proven OSINT discovery module with DuckDuckGo
-        results = osint_discovery.discover_and_score(brand, limit, cfg)
+        discovery = osint_discovery.discovery_report(brand, limit, cfg)
+        results = discovery["results"]
         
         # Format results for UI with enhanced data
         formatted_results = []
@@ -694,7 +695,9 @@ def discover_scams(payload: dict = Body(...)):
         return {
             "results": formatted_results, 
             "count": len(formatted_results),
-            "method": "duckduckgo_search"
+            "method": "duckduckgo_search",
+            **{key: value for key, value in discovery.items()
+               if key != "results"},
         }
         
     except Exception as e:
