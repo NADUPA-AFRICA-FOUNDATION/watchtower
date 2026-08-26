@@ -69,6 +69,9 @@ def main():
     ok &= check("index serves", r.status_code == 200 and "Watchtower" in r.text)
     ok &= check("stylesheet serves", client.get("/style.css").status_code == 200)
     ok &= check("script serves", client.get("/app.js").status_code == 200)
+    ok &= check("OpenSanctions has a visible screening section",
+                'id="sanctions-section"' in r.text
+                and 'id="sanctions-source"' in r.text)
 
     r = client.get("/api/sources")
     body = r.json()

@@ -31,9 +31,13 @@ async function init() {
   }
 
   const box = $("#sources");
+  const sanctionsBox = $("#sanctions-source");
+  const sanctionsNote = $("#sanctions-note");
   data.sources.forEach((s) => {
-    const chip = el("button", "chip", s.name);
+    const isSanctions = s.name === "opensanctions";
+    const chip = el("button", "chip", isSanctions ? "OpenSanctions" : s.name);
     chip.type = "button";
+    chip.dataset.source = s.name;
     // Gate on the key actually being present, not on whether the source is a
     // default. opensanctions is both, so the old `needs_key && !default` guard
     // never fired and it shipped selected but dead.
@@ -44,6 +48,13 @@ async function init() {
     if (!usable) {
       chip.disabled = true;
       chip.title = `Set ${s.key_name || "the API key"} to enable`;
+      if (isSanctions) {
+        sanctionsNote.textContent =
+          `Set ${s.key_name || "OPENSANCTIONS_API_KEY"} to search sanctions, PEP and watchlist records.`;
+      }
+    } else if (isSanctions) {
+      sanctionsNote.textContent =
+        "Ready — include OpenSanctions in this sweep for sanctions, PEP and watchlist matches.";
     }
     chip.onclick = () => {
       chip.classList.toggle("is-on");
@@ -51,7 +62,7 @@ async function init() {
       chip.setAttribute("aria-pressed", String(on));
       on ? selected.add(s.name) : selected.delete(s.name);
     };
-    box.append(chip);
+    (isSanctions ? sanctionsBox : box).append(chip);
   });
 
   // On a serverless host the archive lives in /tmp and does not survive between

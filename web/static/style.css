@@ -552,6 +552,16 @@ textarea#score-text:focus { border-color: var(--low); outline: none;
   box-shadow: 0 0 0 3px rgba(70, 116, 143, .14); }
 textarea#score-text::placeholder { color: var(--faint); }
 
+.sanctions-control {
+  border-left: 3px solid var(--med);
+  padding-left: 12px;
+}
+
+.sanctions-control .source-note {
+  margin: 8px 0 0;
+  max-width: 34rem;
+}
+
 /* ---------------------------------------------------------- hunt log */
 
 .hunt-log {
