@@ -19,7 +19,9 @@ import json
 import logging
 import re
 import sys
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from urllib.parse import quote_plus
 
@@ -41,6 +43,13 @@ from scamscan import (
 load_env()
 
 logger = logging.getLogger(__name__)
+
+# Avoid repeating identical provider requests when an analyst revisits a brand
+# or has several result pages open. Only raw discovery results are cached;
+# scores and analyst decisions are never cached here.
+_SEARCH_CACHE = {}
+_SEARCH_CACHE_LOCK = threading.Lock()
+_SEARCH_CACHE_TTL = 300
 
 # Free hosting providers commonly used for scam sites
 FREE_HOSTS = [
@@ -151,21 +160,23 @@ class DiscoveryError(RuntimeError):
 def generate_queries(cfg, brand_keyword=None):
     """Generate search queries based on brand aliases and search templates."""
     brand = cfg.get("brand", {})
-    aliases = brand.get("aliases", [])
+    excluded = {
+        re.sub(r"[^a-z0-9]", "", value.lower())
+        for value in brand.get("excluded_brands", [])
+    }
+    aliases = [
+        alias for alias in brand.get("aliases", [])
+        if re.sub(r"[^a-z0-9]", "", alias.lower()) not in excluded
+    ]
     
     # Use specific brand keyword if provided, otherwise use main aliases
     if brand_keyword:
         keywords = [brand_keyword]
     else:
-        # Prioritize high-value keywords
-        keywords = []
-        for alias in aliases:
-            alias_lower = alias.lower()
-            # Prioritize financial product names and brand names
-            if any(term in alias_lower for term in ["fuliza", "shwari", "kcb", "tala", "branch", "zenka"]):
-                keywords.insert(0, alias)
-            elif len(alias.split()) <= 2:  # Short aliases are better for search
-                keywords.append(alias)
+        # Priority comes only from this profile's configured aliases. A former
+        # hard-coded list named competing institutions and contaminated every
+        # active brand profile with unrelated searches.
+        keywords = [alias for alias in aliases if len(alias.split()) <= 2]
         
         # Ensure we have at least the main brand name
         if not keywords and aliases:
@@ -271,6 +282,46 @@ def search_duckduckgo(query, max_results=10):
         return results
     except Exception as e:
         raise DiscoveryError(f"DuckDuckGo search failed for query {query!r}: {e}") from e
+
+
+def _cached_search(query, max_results, ttl_seconds=_SEARCH_CACHE_TTL):
+    """Return a defensive copy of a recent successful provider response."""
+    key = (query, max_results)
+    now = time.monotonic()
+    with _SEARCH_CACHE_LOCK:
+        cached = _SEARCH_CACHE.get(key)
+        if cached and now - cached[0] < ttl_seconds:
+            return [dict(row) for row in cached[1]]
+
+    rows = search_duckduckgo(query, max_results=max_results)
+    with _SEARCH_CACHE_LOCK:
+        _SEARCH_CACHE[key] = (now, [dict(row) for row in rows])
+        if len(_SEARCH_CACHE) > 256:
+            oldest = min(_SEARCH_CACHE, key=lambda item: _SEARCH_CACHE[item][0])
+            _SEARCH_CACHE.pop(oldest, None)
+    return rows
+
+
+def _search_queries_parallel(queries, max_results, workers=5, cache_ttl=300):
+    """Search independent query families concurrently in plan order."""
+    if not queries:
+        return []
+    workers = max(1, min(int(workers), len(queries), 8))
+    outcomes = [None] * len(queries)
+    with ThreadPoolExecutor(max_workers=workers,
+                            thread_name_prefix="osint-search") as pool:
+        futures = {
+            pool.submit(_cached_search, query, max_results, cache_ttl):
+                (index, query)
+            for index, query in enumerate(queries)
+        }
+        for future in as_completed(futures):
+            index, query = futures[future]
+            try:
+                outcomes[index] = (query, future.result(), None)
+            except Exception as exc:
+                outcomes[index] = (query, [], exc)
+    return outcomes
 
 
 def check_certificate_transparency(domain_pattern, max_results=20, official_domains=None):
@@ -451,6 +502,31 @@ def fetch_and_analyze_url(url, cfg):
         }
 
 
+def _relevance_tokens(brand_cfg):
+    """Return lower-cased brand terms expected in an on-topic search result."""
+    brand = brand_cfg.get("brand", {})
+    terms = [brand.get("name", ""), *brand.get("aliases", [])]
+    excluded = {
+        value.strip().casefold()
+        for value in brand.get("excluded_brands", [])
+        if value and value.strip()
+    }
+    return {
+        term.strip().casefold()
+        for term in terms
+        if term and term.strip() and term.strip().casefold() not in excluded
+    }
+
+
+def _looks_relevant(result, tokens):
+    """Whether provider metadata contains an active-profile brand term."""
+    haystack = " ".join(
+        (result.get("url", ""), result.get("title", ""),
+         result.get("summary", ""))
+    ).casefold()
+    return any(token in haystack for token in tokens)
+
+
 def discover_and_score(brand, limit, cfg):
     """Discover scams for a brand and return scored results."""
     results = []
@@ -466,23 +542,43 @@ def discover_and_score(brand, limit, cfg):
         [brand] + cfg["brand"].get("aliases", [])))
     
     queries = generate_queries(brand_cfg, brand_keyword=brand)
+    relevance_tokens = _relevance_tokens(brand_cfg)
+    discovery_cfg = cfg.get("discovery", {})
+    # Five selected queries cover every discovery family. Previously ten
+    # provider calls ran serially, so latency was their sum.
+    query_budget = max(1, min(int(discovery_cfg.get("query_budget", 5)), 10))
+    query_plan = select_queries(queries, limit=query_budget)
     
     # Search across hosting, scam-copy and URL-pattern query families.  Gather
     # more candidates than requested because ranking happens after dedupe.
     failures = []
     searched = 0
+    raw_count = 0
+    relevant_count = 0
     candidate_cap = max(limit * 4, limit)
-    for query in select_queries(queries):
-        try:
-            search_results = search_duckduckgo(
-                query, max_results=min(limit * 2, 20))
-            searched += 1
-        except DiscoveryError as exc:
-            failures.append(str(exc))
+    outcomes = _search_queries_parallel(
+        query_plan,
+        max_results=min(limit * 2, 20),
+        workers=discovery_cfg.get("search_concurrency", 5),
+        cache_ttl=discovery_cfg.get("cache_ttl_seconds", _SEARCH_CACHE_TTL),
+    )
+    for query, search_results, error in outcomes:
+        if error:
+            failures.append(str(error))
             continue
+        searched += 1
+        raw_count += len(search_results)
         
         for result in search_results:
             url = result.get('url', '')
+
+            # A quoted-brand query returning content with no active brand term
+            # is evidence that the provider ignored/degraded the query, not a
+            # finding about the brand. Never score that fallback content.
+            if not _looks_relevant(result, relevance_tokens):
+                logger.debug("Dropping off-topic result for %r: %s", query, url)
+                continue
+            relevant_count += 1
             
             # Skip already processed URLs
             if url in seen_urls:
@@ -529,6 +625,14 @@ def discover_and_score(brand, limit, cfg):
     if not searched:
         raise DiscoveryError(
             "No OSINT query could be searched. " + "; ".join(failures[:3]))
+
+    if raw_count and not relevant_count:
+        raise DiscoveryError(
+            f"DuckDuckGo returned {raw_count} results across {searched} "
+            f"queries but none referenced {brand!r} or its configured aliases. "
+            "The search backend likely ignored the query (rate limiting or "
+            "anti-bot blocking is the common cause); this is not a clean scan."
+        )
     
     # Sort by score descending
     results.sort(key=lambda x: x["score"], reverse=True)
