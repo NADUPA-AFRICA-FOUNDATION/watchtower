@@ -39,6 +39,7 @@ investigation:
     redirects_to: 20
     shares_ip: 10
 
+
 enrichment:
   enabled: true           # silently no-ops without ANTHROPIC_API_KEY
   batch_size: 40          # items enriched per run
