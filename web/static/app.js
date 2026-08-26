@@ -112,7 +112,7 @@ $("#window").onclick = (e) => {
 /* Two tools, one front door. The views are independent — nothing on the
    scamscan side reads watchtower's store and vice versa — so switching sides
    is only ever showing and hiding, never a state handover. */
-const VIEWS = ["sweep", "archive", "discover", "queue", "score"];
+const VIEWS = ["sweep", "archive", "campaigns", "discover", "queue", "score"];
 
 document.querySelectorAll(".tab").forEach((tab) => {
   tab.onclick = () => {
@@ -124,8 +124,64 @@ document.querySelectorAll(".tab").forEach((tab) => {
     });
     $("#rail-name").textContent = (tab.dataset.side || "watchtower").toUpperCase();
     if (tab.dataset.view === "queue") loadQueue();
+    if (tab.dataset.view === "campaigns") loadCampaigns();
   };
 });
+
+async function loadCampaigns() {
+  const target = $("#campaign-results");
+  target.replaceChildren(el("p", "hint", "Loading campaigns…"));
+  try {
+    const data = await (await fetch("/api/campaigns")).json();
+    target.replaceChildren();
+    if (!data.campaigns.length) {
+      target.append(el("p", "hint", "No correlated campaigns yet."));
+      return;
+    }
+    data.campaigns.forEach((campaign) => {
+      const card = el("article", "card campaign-card");
+      const heading = el("h3", null, campaign.campaign_id);
+      const dates = el("p", "campaign-dates",
+        `First seen ${campaign.first_seen} · Last seen ${campaign.last_seen} · ${campaign.record_count} records`);
+      const sites = el("p", null, `Active landing sites: ${campaign.active_landing_sites.join(", ") || "none"}`);
+      const sources = el("p", null, `Promotional sources: ${campaign.promotional_sources.join(", ") || "none"}`);
+      const artifacts = el("div", "campaign-artifacts");
+      campaign.shared_artifacts.forEach((a) => artifacts.append(
+        el("code", null, `${a.type}: ${a.normalized_value}`)));
+      const reasons = el("p", "campaign-reasons",
+        `Link reasons: ${[...new Set(campaign.edges.map((e) => e.reason))].join(", ") || "single record"}`);
+      const disposition = el("div", "campaign-disposition");
+      const select = el("select");
+      ["unreviewed", "monitoring", "confirmed", "false_positive", "closed"].forEach((value) => {
+        const option = el("option", null, value.replace("_", " "));
+        option.value = value;
+        option.selected = value === campaign.disposition;
+        select.append(option);
+      });
+      const note = el("input");
+      note.type = "text";
+      note.maxLength = 2000;
+      note.placeholder = "Analyst note";
+      note.value = campaign.analyst_note || "";
+      const save = el("button", null, "Save disposition");
+      save.type = "button";
+      save.onclick = async () => {
+        save.disabled = true;
+        const response = await fetch(`/api/campaigns/${encodeURIComponent(campaign.campaign_id)}/disposition`, {
+          method: "POST", headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({disposition: select.value, note: note.value}),
+        });
+        save.textContent = response.ok ? "Saved" : "Save failed";
+        save.disabled = false;
+      };
+      disposition.append(el("span", null, "Analyst disposition"), select, note, save);
+      card.append(heading, dates, sites, sources, artifacts, reasons, disposition);
+      target.append(card);
+    });
+  } catch (error) {
+    target.replaceChildren(el("p", "hint warn-note", `Could not load campaigns: ${error.message}`));
+  }
+}
 
 /* ----------------------------------------------------------------- sweep */
 
