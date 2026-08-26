@@ -131,6 +131,22 @@ def main():
                 registrable("www.foo.bar.co.ke") == "bar.co.ke")
     ok &= check("homoglyph folding catches cyrillic",
                 impersonation_score("http://ѕafaricom-login.com", CFG["brand"])[0] > 0)
+    ok &= check("short aliases do not match inside unrelated hostnames",
+                impersonation_score("https://safety.example", CFG["brand"])[0] == 0)
+    ok &= check("short aliases still match as a deliberate DNS label",
+                impersonation_score("https://kcb.login.example", CFG["brand"])[0] > 0)
+
+    print("\nhost infrastructure ratings")
+    hosted = {"url": "fuliza-limit.vercel.app", "summary": ""}
+    hosted_score = score_finding(hosted, CFG)
+    ok &= check("bare hosts are rated the same as fully qualified URLs",
+                hosted_score == score_finding({**hosted,
+                                                "url": "https://fuliza-limit.vercel.app"}, CFG))
+    ok &= check("a real free-host suffix is recorded",
+                hosted_score["infrastructure_flags"] == {"on_free_host": True})
+    ok &= check("a lookalike suffix is not treated as free hosting",
+                not score_finding({"url": "https://fuliza-vercel.app.evil.example"},
+                                  CFG)["infrastructure_flags"])
 
     print("\nlexicon")
     hits, _ = lexicon_score("guaranteed returns, double your money", CFG["lexicon"])
