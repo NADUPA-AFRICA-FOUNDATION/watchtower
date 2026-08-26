@@ -641,8 +641,26 @@ function discoveryCard(item) {
   const meta = el("p", "card-meta");
   meta.append(el("span", null, item.brand || "brand"),
     el("span", null, item.source || "search"));
-  try { meta.append(el("span", null, new URL(item.url).hostname)); } catch {}
+  try { meta.append(el("span", null, `landing: ${new URL(item.url).hostname}`)); } catch {}
   c.append(meta);
+  const promo = item.promoted_by;
+  if (promo) {
+    const attribution = el("div", "promotion-evidence");
+    const label = [promo.advertiser_id, promo.platform].filter(Boolean).join(" on ")
+      || "unknown advertiser";
+    attribution.append(el("strong", null, "Promoted by "), el("span", null, label));
+    if (promo.displayed_text) {
+      attribution.append(el("p", "body", promo.displayed_text.slice(0, 240)));
+    }
+    if (promo.source_url) {
+      const source = el("a", null, "View promotion evidence");
+      source.href = promo.source_url;
+      source.target = "_blank";
+      source.rel = "noopener noreferrer";
+      attribution.append(source);
+    }
+    c.append(attribution);
+  }
   if (item.summary) c.append(el("p", "body", item.summary.slice(0, 320)));
 
   const b = item.breakdown || {};

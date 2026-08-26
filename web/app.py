@@ -676,6 +676,20 @@ def discover_scams(payload: dict = Body(...)):
                 classification = "Needs review"
             else:
                 classification = "Weak signal"
+            promotion = item.get("promotion") or item.get("promoted_by")
+            promoted_by = None
+            if isinstance(promotion, dict):
+                # Explicit allow-list: creative engagement metadata is useful
+                # evidence to retain, but is neither a score nor a site fact.
+                promoted_by = {
+                    "platform": str(promotion.get("platform", "")),
+                    "advertiser_id": str(promotion.get(
+                        "advertiser_id", promotion.get("account_id", ""))),
+                    "displayed_text": str(promotion.get("displayed_text", "")),
+                    "source_url": str(promotion.get("source_url", "")),
+                    "first_observed_at": str(promotion.get("first_observed_at", "")),
+                    "last_observed_at": str(promotion.get("last_observed_at", "")),
+                }
             formatted_results.append({
                 "url": item.get("url", ""),
                 "brand": brand,
@@ -689,6 +703,7 @@ def discover_scams(payload: dict = Body(...)):
                     f"Found via: {item.get('source', 'search')}",
                 ],
                 "breakdown": item.get("breakdown", {}),
+                "promoted_by": promoted_by,
             })
         
         return {

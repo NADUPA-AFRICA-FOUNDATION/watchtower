@@ -429,7 +429,10 @@ def discover_and_score(brand, limit, cfg):
             continue
         
         for result in search_results:
-            url = result.get('url', '')
+            # A promotion's platform permalink is provenance, not the site we
+            # are evaluating. Sources that know the click-through target use
+            # landing_url and retain the post/ad under promotion.source_url.
+            url = result.get('landing_url') or result.get('url', '')
             
             # Skip already processed URLs
             if url in seen_urls:
@@ -465,6 +468,10 @@ def discover_and_score(brand, limit, cfg):
                 "source": result.get("source", "duckduckgo"),
                 "query": query,
                 "breakdown": scored,
+                # This object is deliberately passed through after scoring.
+                # Likes, shares and the platform URL can inform attribution,
+                # but never become landing-site risk inputs.
+                "promotion": result.get("promotion"),
             })
             
             if len(results) >= candidate_cap:

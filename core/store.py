@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Iterable, Iterator
 
 from .models import Item
+from discovery.models import SCHEMA as DISCOVERY_SCHEMA
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS items (
@@ -71,7 +72,7 @@ CREATE TABLE IF NOT EXISTS seen_urls (
     source     TEXT,
     first_seen TEXT
 );
-"""
+""" + DISCOVERY_SCHEMA
 
 COLUMNS = [
     "content_hash", "url", "source", "source_type", "title", "text", "author",
