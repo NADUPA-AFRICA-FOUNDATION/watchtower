@@ -581,6 +581,7 @@ $("#discover-form").onsubmit = async (e) => {
   button.textContent = "Searching";
   trace.hidden = false;
   stage.textContent = `looking for ${brand}`;
+  $("#discover-lanes").replaceChildren();
   $("#discover-summary").replaceChildren();
   out.replaceChildren();
 
@@ -597,15 +598,17 @@ $("#discover-form").onsubmit = async (e) => {
       return;
     }
 
+    renderDiscoveryLanes(d.providers || []);
     stage.textContent = `${d.count} candidate${d.count === 1 ? "" : "s"}`;
     const summary = $("#discover-summary");
     summary.append(el("span", null,
       `${d.count} ranked candidate${d.count === 1 ? "" : "s"}`));
+    if (!d.complete) summary.append(el("span", "incomplete", "Incomplete discovery"));
     summary.append(el("span", "warn", "review before acting"));
     if (!d.results.length) {
       const empty = el("div", "empty-inline");
-      empty.append(el("h3", null, "No candidates returned"),
-        el("p", null, "This only describes this search run; it does not establish that the brand is clean."));
+      empty.append(el("h3", null, "Zero candidates in searched sources"),
+        el("p", null, "This search found no candidates. It does not mean no scams exist."));
       out.replaceChildren(empty);
     } else {
       out.replaceChildren(...d.results.map(discoveryCard));
@@ -618,6 +621,41 @@ $("#discover-form").onsubmit = async (e) => {
     button.textContent = "Discover";
   }
 };
+
+const DISCOVERY_STATES = {
+  zero_candidates: "0 candidates",
+  searched_zero_candidates: "0 candidates",
+  candidates_found: (p) => `${p.results_found || 0} found`,
+  searched_candidates_found: (p) => `${p.results_found || 0} found`,
+  unavailable_credentials: "credentials unavailable",
+  unavailable_platform_approval: "approval unavailable",
+  rate_limited: "rate limited",
+  failed: "failed",
+  timed_out: "timed out",
+  disabled_configuration: "disabled",
+  disabled_by_configuration: "disabled",
+};
+
+function renderDiscoveryLanes(providers) {
+  const box = $("#discover-lanes");
+  box.replaceChildren();
+  providers.forEach((p) => {
+    const searched = ["zero_candidates", "searched_zero_candidates",
+      "candidates_found", "searched_candidates_found"].includes(p.state);
+    const lane = el("div", `lane done discovery-lane state-${p.state}`);
+    if (!searched) lane.classList.add(p.state.includes("disabled") ? "skipped" : "failed");
+    if (p.state.includes("zero_candidates")) lane.classList.add("zero");
+    lane.append(el("span", "lane-name", p.name));
+    const bar = el("div", "lane-bar");
+    bar.append(el("div", "lane-fill"));
+    lane.append(bar);
+    const label = DISCOVERY_STATES[p.state] || p.state.replaceAll("_", " ");
+    lane.append(el("span", "lane-count", typeof label === "function" ? label(p) : label));
+    lane.style.setProperty("--w", `${Math.min(100, (p.results_found || 0) * 5) || 4}%`);
+    lane.title = [p.reason, p.limitation].filter(Boolean).join(" — ");
+    box.append(lane);
+  });
+}
 
 function discoveryCard(item) {
   const c = el("article", "card");

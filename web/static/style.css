@@ -357,6 +357,10 @@ main { max-width: 1080px; margin: 0 auto; padding: 32px 24px 80px; }
 .lane-count { text-align: right; color: var(--faint); }
 .lane.done .lane-count { color: var(--ink); }
 .lane.failed .lane-count { color: var(--high); font-size: 10px; }
+.discovery-lane { grid-template-columns: 128px 1fr minmax(96px, auto); }
+.discovery-lane.state-rate_limited .lane-name,
+.discovery-lane.state-timed_out .lane-name { color: var(--med); }
+.summary .incomplete { color: var(--high); font-weight: 600; }
 
 @media (prefers-reduced-motion: reduce) {
   .lane.pending .lane-bar::after { animation: none; opacity: .5; }

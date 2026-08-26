@@ -400,6 +400,31 @@ def fetch_and_analyze_url(url, cfg):
 
 def discover_and_score(brand, limit, cfg):
     """Discover scams for a brand and return scored results."""
+    return discovery_report(brand, limit, cfg)["results"]
+
+
+def _failure_state(message):
+    """Turn provider wording into a stable, presentation-safe outcome."""
+    text = message.lower()
+    if "rate limit" in text or "429" in text or "too many requests" in text:
+        return "rate_limited"
+    if "timed out" in text or "timeout" in text:
+        return "timed_out"
+    if "platform approval" in text or "access approval" in text:
+        return "unavailable_platform_approval"
+    if "install" in text or "unavailable" in text:
+        return "unavailable_credentials"
+    return "failed"
+
+
+def discovery_report(brand, limit, cfg):
+    """Discover and return results plus an honest account of search coverage.
+
+    A provider failure is data about the run rather than an HTTP failure.  In
+    particular, it must not be collapsed into the same response as a completed
+    search which happened to find zero candidates.
+    """
+    started = time.monotonic()
     results = []
     seen_urls = set()
     
@@ -418,8 +443,10 @@ def discover_and_score(brand, limit, cfg):
     # more candidates than requested because ranking happens after dedupe.
     failures = []
     searched = 0
+    queries_attempted = 0
     candidate_cap = max(limit * 4, limit)
     for query in select_queries(queries):
+        queries_attempted += 1
         try:
             search_results = search_duckduckgo(
                 query, max_results=min(limit * 2, 20))
@@ -473,14 +500,57 @@ def discover_and_score(brand, limit, cfg):
         if len(results) >= candidate_cap:
             break
 
-    if not searched:
-        raise DiscoveryError(
-            "No OSINT query could be searched. " + "; ".join(failures[:3]))
-    
     # Sort by score descending
     results.sort(key=lambda x: x["score"], reverse=True)
-    
-    return results[:limit]
+    candidates_discovered = len(results)
+    results = results[:limit]
+
+    if searched:
+        state = "candidates_found" if results else "zero_candidates"
+    else:
+        state = _failure_state("; ".join(failures))
+    detail = {
+        "name": "duckduckgo",
+        "state": state,
+        "queries_planned": len(select_queries(queries)),
+        "queries_attempted": queries_attempted,
+        "queries_searched": searched,
+        "results_found": len(results),
+        "limitation": (
+            "Public web-index coverage varies by region and indexing delay; "
+            "results do not cover private, unindexed, or newly published pages."
+        ),
+    }
+    if failures:
+        detail["reason"] = failures[0]
+    complete = searched == detail["queries_planned"]
+    return {
+        "results": results,
+        "complete": complete,
+        "providers_planned": ["duckduckgo"],
+        "providers_searched": ["duckduckgo"] if searched else [],
+        "providers_failed": ["duckduckgo"] if failures else [],
+        "providers_skipped": [],
+        "queries_planned": detail["queries_planned"],
+        "queries_attempted": queries_attempted,
+        "queries_searched": searched,
+        "results_found": len(results),
+        "elapsed_seconds": round(time.monotonic() - started, 3),
+        "elapsed_time": round(time.monotonic() - started, 3),
+        "query_counts": {
+            "planned": detail["queries_planned"],
+            "attempted": queries_attempted,
+            "searched": searched,
+            "failed": len(failures),
+            "skipped": detail["queries_planned"] - queries_attempted,
+        },
+        "result_counts": {
+            "candidates_discovered": candidates_discovered,
+            "candidates_returned": len(results),
+        },
+        "provider_limitations": {"duckduckgo": detail["limitation"]},
+        "providers": [detail],
+    }
 
 
 def discover(cfg, limit=20, source="all", brand_keyword=None, dry_run=False):
