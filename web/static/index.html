@@ -24,6 +24,7 @@
       <span class="side-label">watchtower</span>
       <button class="tab is-on" data-view="sweep" data-side="watchtower">Sweep</button>
       <button class="tab" data-view="archive" data-side="watchtower">Archive</button>
+      <button class="tab" data-view="campaigns" data-side="watchtower">Campaigns</button>
     </div>
     <div class="side-group" data-side="scamscan">
       <span class="side-label">scamscan</span>
@@ -131,6 +132,19 @@
     </p>
   </form>
   <div class="findings" id="archive-results"></div>
+</section>
+
+<!-- ========================= CAMPAIGNS ========================= -->
+<section id="view-campaigns" hidden>
+  <header class="view-head">
+    <div>
+      <span class="eyebrow">Explainable correlation</span>
+      <h1>Campaigns</h1>
+      <p>Records are linked by shared operator artifacts. Cloud hosting, IPs, and nameservers are context only and never create an edge by themselves.</p>
+    </div>
+    <span class="method-badge">artifact graph</span>
+  </header>
+  <div class="findings" id="campaign-results"></div>
 </section>
 
 <!-- ========================== DISCOVER ========================== -->

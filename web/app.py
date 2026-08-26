@@ -34,6 +34,7 @@ from core.fetch import Fetcher
 from core.sources import BACKEND_KEYS, BACKENDS, DEFAULT_BACKENDS, has_credentials
 from core.store import Store
 from core.sweep import sweep
+from campaigns import CampaignStore
 
 # The two tools stay independent of each other; only this layer knows about
 # both. scamscan still imports nothing from core/, and core/ imports nothing
@@ -163,6 +164,50 @@ def stats():
     store = Store(data_path(cfg["storage"]["database"]))
     try:
         return store.stats()
+    finally:
+        store.close()
+
+
+def campaign_store() -> CampaignStore:
+    return CampaignStore(str(data_path("campaigns.db")))
+
+
+@app.get("/api/campaigns")
+def list_campaigns():
+    store = campaign_store()
+    try:
+        return {"campaigns": store.campaigns(), "ephemeral_storage": EPHEMERAL}
+    finally:
+        store.close()
+
+
+@app.post("/api/campaigns/observe")
+def observe_campaign_record(payload: dict = Body(...)):
+    store = campaign_store()
+    try:
+        campaign_id = store.observe(
+            payload.get("record_id", ""), payload.get("artifacts", []),
+            landing_url=str(payload.get("landing_url", ""))[:2000],
+            promotional_source=str(payload.get("promotional_source", ""))[:500],
+            seen_at=payload.get("seen_at"),
+        )
+        return store.campaign(campaign_id)
+    except (ValueError, KeyError) as exc:
+        raise HTTPException(400, str(exc))
+    finally:
+        store.close()
+
+
+@app.post("/api/campaigns/{campaign_id}/disposition")
+def campaign_disposition(campaign_id: str, payload: dict = Body(...)):
+    store = campaign_store()
+    try:
+        if not store.set_disposition(campaign_id, str(payload.get("disposition", "")),
+                                     str(payload.get("note", ""))):
+            raise HTTPException(404, "campaign not found")
+        return store.campaign(campaign_id)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
     finally:
         store.close()
 

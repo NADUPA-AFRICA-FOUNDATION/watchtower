@@ -203,6 +203,15 @@ main { max-width: 1080px; margin: 0 auto; padding: 32px 24px 80px; }
   font-size: 12px;
 }
 
+.campaign-card p { margin: 7px 0; color: var(--muted); }
+.campaign-artifacts { display: flex; flex-wrap: wrap; gap: 6px; margin: 12px 0; }
+.campaign-dates, .campaign-reasons, .campaign-disposition { font-family: var(--mono); font-size: 12px; }
+.campaign-disposition { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 12px; }
+.campaign-disposition input { flex: 1; min-width: 180px; }
+.campaign-disposition input, .campaign-disposition select, .campaign-disposition button {
+  font: inherit; padding: 7px 9px; border: 1px solid var(--rule); background: var(--surface); color: var(--ink);
+}
+
 .hint { margin: 10px 0 0; font-size: 13px; color: var(--muted); }
 
 /* Deployment caveat, not a result. Coloured because it changes what the
