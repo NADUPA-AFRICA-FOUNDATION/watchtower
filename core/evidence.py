@@ -341,15 +341,12 @@ class EvidenceCollector:
         """Score infrastructure-related risk (0-25)."""
         score = 0
         
-        # CRITICAL: Brand impersonation on free hosting is an automatic high-risk signal
-        # This cannot be averaged out by other factors
+        # Hosting is supporting evidence only. Multi-tenant platforms and new
+        # domains are common among legitimate sites, so neither can determine a
+        # verdict without identity, content, reputation, or campaign evidence.
         free_hosts = ["vercel.app", "netlify.app", "firebaseapp.com", "web.app", "pages.dev", 
                       "herokuapp.com", "blogspot.com", "wordpress.com", "wixsite.com"]
         is_free_hosting = any(fh in record.domain for fh in free_hosts)
-        
-        if is_free_hosting and record.brand_impersonation_score >= 50:
-            # CRITICAL TRIGGER: Free hosting + brand mention = likely scam
-            return 25  # Maximum score for this category
         
         # Newly registered domain
         if record.domain_age_days is not None and record.domain_age_days < 30:
@@ -359,9 +356,9 @@ class EvidenceCollector:
         if record.certificate_age_days is not None and record.certificate_age_days < 7:
             score += 10
         
-        # Free hosting alone (without brand) is still suspicious
+        # A small supporting signal, never an automatic classification.
         if is_free_hosting:
-            score += 15
+            score += 5
         
         # Malicious IP history (from GreyNoise)
         if record.greynoise_classification in ["malicious", "attacker"]:
@@ -472,21 +469,12 @@ class EvidenceCollector:
         if self._is_verified_official(record):
             return "VERIFIED_OFFICIAL"
         
-        # CRITICAL: Brand impersonation on free hosting = automatic HIGH_RISK
-        free_hosts = ["vercel.app", "netlify.app", "firebaseapp.com", "web.app", "pages.dev",
-                      "herokuapp.com", "blogspot.com", "wordpress.com", "wixsite.com"]
-        is_free_hosting = any(fh in record.domain for fh in free_hosts)
-        
-        if is_free_hosting and record.brand_impersonation_score >= 50:
-            # This is a critical pattern that cannot be downgraded
-            return "HIGH_RISK"
-        
         # Confirmed malicious: strong reputation signals
         if verdict.reputation_risk >= 35:
             return "CONFIRMED_MALICIOUS"
         
         # High risk: multiple strong indicators OR brand impersonation on suspicious infrastructure
-        if verdict.risk_score >= 70 or (record.brand_impersonation_score >= 70 and is_free_hosting):
+        if verdict.risk_score >= 70:
             return "HIGH_RISK"
         
         # Suspicious: some concerning indicators OR any brand impersonation

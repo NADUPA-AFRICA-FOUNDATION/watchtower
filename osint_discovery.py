@@ -21,7 +21,6 @@ import re
 import sys
 import time
 from datetime import datetime, timezone
-from urllib.parse import quote_plus
 
 try:
     from ddgs import DDGS
@@ -102,10 +101,6 @@ SEARCH_TEMPLATES = [
     'inurl:{brand} inurl:limit',
     'inurl:{brand} inurl:loan',
 ]
-
-# Certificate Transparency query endpoints
-CT_SEARCH_URL = "https://crt.sh/?q=%.{domain}&output=json"
-
 
 class DiscoveryError(RuntimeError):
     """A search could not run; distinct from a successful zero-result search."""
@@ -221,75 +216,13 @@ def search_duckduckgo(query, max_results=10):
 
 
 def check_certificate_transparency(domain_pattern, max_results=20, official_domains=None):
-    """Query Certificate Transparency logs for certificates matching pattern."""
-    import urllib.request
-    import ssl
-    
-    try:
-        url = CT_SEARCH_URL.format(domain=quote_plus(domain_pattern))
-        
-        # Create SSL context that doesn't verify (for crt.sh which uses self-signed)
-        ctx = ssl.create_default_context()
-        ctx.check_hostname = False
-        ctx.verify_mode = ssl.CERT_NONE
-        
-        req = urllib.request.Request(
-            url,
-            headers={"User-Agent": "Mozilla/5.0 (compatible; ScamScan/1.0)"}
-        )
-        
-        with urllib.request.urlopen(req, timeout=10, context=ctx) as response:
-            data = response.read().decode("utf-8", errors="ignore")
-            
-        # Parse JSON response
-        certs = json.loads(data) if data.strip() else []
-        
-        results = []
-        seen_domains = set()
-        
-        for cert in certs[:max_results]:
-            # Extract domain names from certificate
-            name = cert.get("name_value", "")
-            domains = name.split("\n")
-            
-            for domain in domains:
-                domain = domain.strip().lower()
-                if domain and domain not in seen_domains:
-                    # Skip wildcards and already-known-good domains
-                    if domain.startswith("*."):
-                        domain = domain[2:]
-                    
-                    if domain in seen_domains:
-                        continue
-                    
-                    seen_domains.add(domain)
-                    
-                    # Skip official domains (passed as parameter)
-                    if any(domain.endswith(odom.lower()) for odom in (official_domains or [])):
-                        continue
-                    
-                    # Construct potential URLs
-                    if not domain.startswith(("http://", "https://")):
-                        url = f"https://{domain}"
-                    else:
-                        url = domain
-                    
-                    results.append({
-                        "title": f"Certificate: {domain}",
-                        "url": url,
-                        "summary": f"Domain found in CT logs matching {domain_pattern}",
-                        "source": "certificate_transparency",
-                        "query": domain_pattern,
-                        "cert_info": {
-                            "issuer": cert.get("issuer_name", ""),
-                            "registered": cert.get("entry_timestamp", ""),
-                        }
-                    })
-        
-        return results
-    except Exception as e:
-        logger.error(f"CT search failed for '{domain_pattern}': {e}")
-        return []
+    """Compatibility wrapper; CT collection lives in the common provider."""
+    from discovery.providers.certificate_transparency import collect
+    config={"brand":{"aliases":[domain_pattern],"official_domains":official_domains or []}}
+    result=collect(config, brand_keyword=domain_pattern, limit=max_results)
+    if result.state.value == "failed":
+        raise DiscoveryError(result.reason)
+    return result.candidates
 
 
 def evaluate_url(url, title, summary, cfg):
@@ -522,26 +455,30 @@ def discover(cfg, limit=20, source="all", brand_keyword=None, dry_run=False):
             # Rate limiting
             time.sleep(0.5)
     
-    if source in ("all", "ct"):
-        logger.info("Checking Certificate Transparency logs...")
-        brand = cfg.get("brand", {})
-        aliases = brand.get("aliases", [])
-        
-        # Check CT for each brand alias
-        for alias in aliases[:5]:  # Limit CT queries
-            clean_alias = re.sub(r'[^a-z0-9]', '', alias.lower())
-            if len(clean_alias) < 3:
-                continue
-                
-            ct_results = check_certificate_transparency(clean_alias, max_results=10)
-            
-            for r in ct_results:
-                url = r.get("url", "")
-                if url and url not in seen_urls:
-                    seen_urls.add(url)
-                    all_findings.append(r)
-            
-            time.sleep(1.0)  # CT API rate limiting
+    provider_names = {
+        "ct": "certificate_transparency", "rdap": "rdap",
+        "passive_dns": "passive_dns", "url_reputation": "url_reputation",
+        "url_scanning": "url_scanning",
+    }
+    if source != "search":
+        logger.info("Running common discovery providers...")
+        from discovery.orchestrator import run_discovery
+        if source == "all":
+            configured = cfg.get("discovery", {}).get("enabled_providers", [])
+            requested = ["certificate_transparency", *configured]
+        else:
+            requested = [provider_names[source]]
+        seed = list(all_findings)
+        report = run_discovery(
+            cfg, brand_keyword=brand_keyword, limit=max(limit * 2, 20),
+            providers=list(dict.fromkeys(requested)), seed_candidates=seed)
+        failures = [r.reason for r in report.providers.values()
+                    if r.state.value == "failed"]
+        if failures and not report.candidates:
+            raise DiscoveryError("; ".join(failures))
+        # Keep provider enrichment and correlation annotations on search seeds.
+        all_findings = report.candidates
+        seen_urls = {r.get("url", "") for r in all_findings}
     
     # Evaluate and score findings
     logger.info(f"Evaluating {len(all_findings)} unique URLs...")
@@ -664,8 +601,11 @@ def add_discover_parser(subparsers):
     d = subparsers.add_parser("discover", help="actively hunt for scam websites")
     d.add_argument("--config", default="config.json")
     d.add_argument("--limit", type=int, default=20, help="max results to return")
-    d.add_argument("--source", choices=["all", "search", "ct"], default="all",
-                   help="discovery source: all, search (engine), ct (certificates)")
+    d.add_argument(
+        "--source",
+        choices=["all", "search", "ct", "rdap", "passive_dns",
+                 "url_reputation", "url_scanning"],
+        default="all", help="discovery source/provider")
     d.add_argument("--brand", help="specific brand keyword to search for")
     d.add_argument("--dry-run", action="store_true",
                    help="show queries without executing")
