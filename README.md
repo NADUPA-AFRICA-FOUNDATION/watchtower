@@ -2,6 +2,9 @@
 
 > **African Financial Fraud Intelligence Platform**
 
+See [`AUDIT.md`](AUDIT.md) for the current functional verification boundary,
+UI/UX review, integration recommendations, and prioritised remediation plan.
+
 This repository contains two complementary tools for threat intelligence:
 
 - **Watchtower**: Monitors news, regulatory sources, and sanctions lists for emerging threats
