@@ -180,6 +180,8 @@ def run_sweep(
     limit: int = Query(40, ge=1, le=250),
     max_ai: int = Query(25, ge=0, le=100),
 ):
+    if save and EPHEMERAL:
+        raise HTTPException(409, "saved results require durable storage; set WATCHTOWER_DATA_DIR")
     cfg = config()
     backends = [s.strip() for s in sources.split(",") if s.strip()] or DEFAULT_BACKENDS
     unknown = [b for b in backends if b not in BACKENDS]
@@ -408,6 +410,8 @@ def scamscan_queue(
 
 @app.post("/api/scamscan/dispose")
 def scamscan_dispose(payload: dict = Body(...)):
+    if EPHEMERAL:
+        raise HTTPException(409, "analyst verdicts require durable storage; set WATCHTOWER_DATA_DIR")
     verdicts = {"confirmed", "false_positive", "unclear", "escalated", "new"}
     fingerprint = str(payload.get("fingerprint", "")).strip()
     verdict = str(payload.get("verdict", "")).strip()
@@ -464,6 +468,8 @@ def scamscan_hunt(topics: int = Query(1, ge=1, le=20)):
     Costs real money per query — web search is billed separately from tokens —
     so `topics` is capped and the UI states the ceiling before you click.
     """
+    if EPHEMERAL:
+        raise HTTPException(409, "hunts require durable storage so findings and verdicts are retained")
     cfg = scamscan_config()
     which = scamscan.provider(cfg)
     if not which:

@@ -109,6 +109,30 @@ button { font-family: inherit; cursor: pointer; }
 
 main { max-width: 1080px; margin: 0 auto; padding: 32px 24px 80px; }
 
+.system-status {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 8px 20px;
+  align-items: center;
+  margin-bottom: 28px;
+  padding: 14px 16px;
+  background: var(--sunk);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius);
+}
+.system-status p { margin: 3px 0 0; color: var(--muted); }
+.system-status ul { grid-column: 1 / -1; margin: 6px 0 0; padding-left: 20px; color: var(--muted); }
+.status-toggle, .cancel-run {
+  border: 1px solid var(--rule);
+  border-radius: 3px;
+  background: var(--surface);
+  color: var(--ink);
+  padding: 6px 9px;
+  font: 500 11px var(--mono);
+  cursor: pointer;
+}
+.compact-head { margin-bottom: 18px; }
+
 .view-head {
   display: flex;
   align-items: flex-end;
@@ -301,6 +325,8 @@ main { max-width: 1080px; margin: 0 auto; padding: 32px 24px 80px; }
   color: var(--muted);
   margin-left: auto;
 }
+
+.cancel-run { margin-left: 0; }
 
 .trace-lanes { display: grid; gap: 7px; }
 
