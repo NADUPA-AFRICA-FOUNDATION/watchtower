@@ -1,4 +1,9 @@
 {
+  "discovery": {
+    "query_budget": 5,
+    "search_concurrency": 5,
+    "cache_ttl_seconds": 300
+  },
   "brand": {
     "name": "M-PESA",
     "aliases": [
