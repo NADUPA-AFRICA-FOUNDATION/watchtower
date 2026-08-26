@@ -40,8 +40,10 @@ investigation:
     shares_ip: 10
 
 discovery:
-  # Independent query families run concurrently. Five covers hosting,
+  # Keep this block when merging with main: it controls the bounded parallel
+  # search added by osint_discovery.py. Five queries cover hosting,
   # suspicious-copy, URL-pattern, targeted-host and multilingual families.
+  # config.json mirrors these values for the standalone ScamScan CLI.
   query_budget: 5
   search_concurrency: 5
   cache_ttl_seconds: 300
