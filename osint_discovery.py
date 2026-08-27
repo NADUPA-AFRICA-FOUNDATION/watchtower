@@ -160,21 +160,23 @@ class DiscoveryError(RuntimeError):
 def generate_queries(cfg, brand_keyword=None):
     """Generate search queries based on brand aliases and search templates."""
     brand = cfg.get("brand", {})
-    aliases = brand.get("aliases", [])
+    excluded = {
+        re.sub(r"[^a-z0-9]", "", value.lower())
+        for value in brand.get("excluded_brands", [])
+    }
+    aliases = [
+        alias for alias in brand.get("aliases", [])
+        if re.sub(r"[^a-z0-9]", "", alias.lower()) not in excluded
+    ]
     
     # Use specific brand keyword if provided, otherwise use main aliases
     if brand_keyword:
         keywords = [brand_keyword]
     else:
-        # Prioritize high-value keywords
-        keywords = []
-        for alias in aliases:
-            alias_lower = alias.lower()
-            # Prioritize financial product names and brand names
-            if any(term in alias_lower for term in ["fuliza", "shwari", "kcb", "tala", "branch", "zenka"]):
-                keywords.insert(0, alias)
-            elif len(alias.split()) <= 2:  # Short aliases are better for search
-                keywords.append(alias)
+        # Priority comes only from this profile's configured aliases. A former
+        # hard-coded list named competing institutions and contaminated every
+        # active brand profile with unrelated searches.
+        keywords = [alias for alias in aliases if len(alias.split()) <= 2]
         
         # Ensure we have at least the main brand name
         if not keywords and aliases:
@@ -500,8 +502,33 @@ def fetch_and_analyze_url(url, cfg):
         }
 
 
-def discover_and_score(brand, limit, cfg):
-    """Discover scams for a brand and return scored results."""
+def _relevance_tokens(brand_cfg):
+    """Return lower-cased brand terms expected in an on-topic search result."""
+    brand = brand_cfg.get("brand", {})
+    terms = [brand.get("name", ""), *brand.get("aliases", [])]
+    excluded = {
+        value.strip().casefold()
+        for value in brand.get("excluded_brands", [])
+        if value and value.strip()
+    }
+    return {
+        term.strip().casefold()
+        for term in terms
+        if term and term.strip() and term.strip().casefold() not in excluded
+    }
+
+
+def _looks_relevant(result, tokens):
+    """Whether provider metadata contains an active-profile brand term."""
+    haystack = " ".join(
+        (result.get("url", ""), result.get("title", ""),
+         result.get("summary", ""))
+    ).casefold()
+    return any(token in haystack for token in tokens)
+
+
+def discover_and_score(brand, limit, cfg, include_diagnostics=False):
+    """Discover scams for a brand and optionally return run diagnostics."""
     results = []
     seen_urls = set()
     
@@ -515,6 +542,7 @@ def discover_and_score(brand, limit, cfg):
         [brand] + cfg["brand"].get("aliases", [])))
     
     queries = generate_queries(brand_cfg, brand_keyword=brand)
+
     discovery_cfg = cfg.get("discovery", {})
     # Five selected queries cover every discovery family. Previously ten
     # provider calls ran serially, so latency was their sum.
@@ -525,6 +553,8 @@ def discover_and_score(brand, limit, cfg):
     # more candidates than requested because ranking happens after dedupe.
     failures = []
     searched = 0
+    raw_count = 0
+    relevant_count = 0
     candidate_cap = max(limit * 4, limit)
     outcomes = _search_queries_parallel(
         query_plan,
@@ -537,9 +567,18 @@ def discover_and_score(brand, limit, cfg):
             failures.append(str(error))
             continue
         searched += 1
+
         
         for result in search_results:
             url = result.get('url', '')
+
+            # A quoted-brand query returning content with no active brand term
+            # is evidence that the provider ignored/degraded the query, not a
+            # finding about the brand. Never score that fallback content.
+            if not _looks_relevant(result, relevance_tokens):
+                logger.debug("Dropping off-topic result for %r: %s", query, url)
+                continue
+            relevant_count += 1
             
             # Skip already processed URLs
             if url in seen_urls:
@@ -586,11 +625,34 @@ def discover_and_score(brand, limit, cfg):
     if not searched:
         raise DiscoveryError(
             "No OSINT query could be searched. " + "; ".join(failures[:3]))
+
+    if raw_count and not relevant_count:
+        raise DiscoveryError(
+            f"DuckDuckGo returned {raw_count} results across {searched} "
+            f"queries but none referenced {brand!r} or its configured aliases. "
+            "The search backend likely ignored the query (rate limiting or "
+            "anti-bot blocking is the common cause); this is not a clean scan."
+        )
     
     # Sort by score descending
     results.sort(key=lambda x: x["score"], reverse=True)
     
-    return results[:limit]
+    selected_results = results[:limit]
+    if include_diagnostics:
+        return {
+            "results": selected_results,
+            "coverage": {
+                "provider": "duckduckgo",
+                "queries_planned": len(query_plan),
+                "queries_succeeded": searched,
+                "queries_failed": len(failures),
+                "raw_results": raw_count,
+                "brand_relevant_results": relevant_count,
+                "qualifying_candidates": len(selected_results),
+                "failures": failures[:3],
+            },
+        }
+    return selected_results
 
 
 def discover(cfg, limit=20, source="all", brand_keyword=None, dry_run=False):

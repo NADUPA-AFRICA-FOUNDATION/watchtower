@@ -192,6 +192,11 @@ def impersonation_score(url, brand):
     if domain in {registrable(d) for d in brand["official_domains"]}:
         return 0, "official domain"
 
+    labels = [fold(label) for label in host.split(".") if fold(label)]
+    excluded = {fold(value) for value in brand.get("excluded_brands", [])}
+    if excluded.intersection(labels):
+        return 0, "excluded brand"
+
     best, matched = 0.0, ""
     for official in brand["official_domains"]:
         label = registrable(official).split(".")[0]
@@ -203,10 +208,13 @@ def impersonation_score(url, brand):
     # ``mpesa-verify`` is retained.  Very short aliases (for example ``saf``
     # and ``kcb``) must occupy a whole label: substring matching made unrelated
     # hosts such as ``safari.example`` look like brand impersonation.
-    labels = [fold(label) for label in host.split(".") if fold(label)]
     label_hits = []
     for alias in brand["aliases"]:
         needle = fold(alias)
+        # Exclusions are exact canonical brand names. This deliberately keeps
+        # co-branded products such as "kcb mpesa" while excluding bare "kcb".
+        if needle in excluded:
+            continue
         if needle and any(needle == label if len(needle) <= 3 else needle in label
                           for label in labels):
             label_hits.append(alias)
