@@ -6,7 +6,7 @@ source reports in as it lands. The sweep itself runs in a worker thread and
 pushes events onto a queue that the response generator drains.
 
     python run.py serve            # http://127.0.0.1:8000
-    
+
 Now with async support for fast OSINT discovery using watchtower_async module.
 """
 
@@ -34,6 +34,7 @@ from core.fetch import Fetcher
 from core.sources import BACKEND_KEYS, BACKENDS, DEFAULT_BACKENDS, has_credentials
 from core.store import Store
 from core.sweep import sweep
+from investigation.storage import InvestigationStore
 
 # The two tools stay independent of each other; only this layer knows about
 # both. scamscan still imports nothing from core/, and core/ imports nothing
@@ -53,9 +54,14 @@ STATIC = Path(__file__).resolve().parent / "static"
 # EPHEMERAL is surfaced through /api/sources so the UI can say so out loud
 # rather than letting someone believe they have an archive they don't.
 _EXPLICIT_DATA_DIR = os.environ.get("WATCHTOWER_DATA_DIR")
-SERVERLESS = bool(os.environ.get("VERCEL") or os.environ.get("AWS_LAMBDA_FUNCTION_NAME"))
-DATA_DIR = Path(_EXPLICIT_DATA_DIR) if _EXPLICIT_DATA_DIR else (
-    Path("/tmp/watchtower") if SERVERLESS else ROOT)
+SERVERLESS = bool(
+    os.environ.get("VERCEL") or os.environ.get("AWS_LAMBDA_FUNCTION_NAME")
+)
+DATA_DIR = (
+    Path(_EXPLICIT_DATA_DIR)
+    if _EXPLICIT_DATA_DIR
+    else (Path("/tmp/watchtower") if SERVERLESS else ROOT)
+)
 EPHEMERAL = SERVERLESS and not _EXPLICIT_DATA_DIR
 
 # Wall-clock ceiling for one sweep. A serverless host kills the request at a
@@ -63,16 +69,27 @@ EPHEMERAL = SERVERLESS and not _EXPLICIT_DATA_DIR
 # and report which sources didn't make it. Unset (no limit) off serverless,
 # where a 60s sweep is fine. Keep this below the platform's own timeout —
 # vercel.json sets maxDuration to 300, so 270 leaves room to return.
-SWEEP_BUDGET = float(os.environ.get("WATCHTOWER_SWEEP_BUDGET",
-                                    "270" if SERVERLESS else "0")) or None
+SWEEP_BUDGET = (
+    float(os.environ.get("WATCHTOWER_SWEEP_BUDGET", "270" if SERVERLESS else "0"))
+    or None
+)
 
 app = FastAPI(title="watchtower", docs_url="/api/docs")
 
 
+def investigation_store() -> InvestigationStore:
+    cfg = config()
+    return InvestigationStore(
+        data_path(cfg["storage"].get("investigations_database", "investigations.db"))
+    )
+
+
 def config() -> dict:
     from run import expand_env
-    return expand_env(yaml.safe_load(
-        (ROOT / "config.yaml").read_text(encoding="utf-8")))
+
+    return expand_env(
+        yaml.safe_load((ROOT / "config.yaml").read_text(encoding="utf-8"))
+    )
 
 
 def data_path(relative) -> Path:
@@ -114,47 +131,272 @@ async def require_password(request, call_next):
 
     if not WT_PASSWORD:
         return JSONResponse(
-            {"detail": "WATCHTOWER_PASSWORD is not set. Refusing to serve a "
-                       "public instance without authentication — /api/sweep "
-                       "and /api/scamscan/hunt spend real API credits and the "
-                       "review queue holds personal data. Set it in the host's "
-                       "environment variables and redeploy."},
-            status_code=503)
+            {
+                "detail": "WATCHTOWER_PASSWORD is not set. Refusing to serve a "
+                "public instance without authentication — /api/sweep "
+                "and /api/scamscan/hunt spend real API credits and the "
+                "review queue holds personal data. Set it in the host's "
+                "environment variables and redeploy."
+            },
+            status_code=503,
+        )
 
     supplied = request.headers.get("authorization", "")
-    expected = "Basic " + base64.b64encode(
-        f"{WT_USER}:{WT_PASSWORD}".encode()).decode()
+    expected = "Basic " + base64.b64encode(f"{WT_USER}:{WT_PASSWORD}".encode()).decode()
     # Constant-time compare: a plain != leaks the password a byte at a time.
     if not secrets.compare_digest(supplied, expected):
         return JSONResponse(
-            {"detail": "authentication required"}, status_code=401,
-            headers={"WWW-Authenticate": 'Basic realm="watchtower"'})
+            {"detail": "authentication required"},
+            status_code=401,
+            headers={"WWW-Authenticate": 'Basic realm="watchtower"'},
+        )
     return await call_next(request)
 
 
 # ------------------------------------------------------------------ meta
+
 
 @app.get("/api/sources")
 def list_sources():
     cfg = config()
     enricher = Enricher([], cfg.get("enrichment", {}).get("categories", []))
     from core.enrich import available_provider
+
     # `available` is about credentials actually being present, which is not the
     # same question as `default`. opensanctions is both a default and key-gated,
     # so keying the UI off `default` left it selected and silently returning
     # nothing — the worst possible failure for a sanctions check.
     return {
         "sources": [
-            {"name": n, "default": n in DEFAULT_BACKENDS,
-             "needs_key": n in BACKEND_KEYS,
-             "available": has_credentials(n),
-             "key_name": BACKEND_KEYS.get(n, "")}
+            {
+                "name": n,
+                "default": n in DEFAULT_BACKENDS,
+                "needs_key": n in BACKEND_KEYS,
+                "available": has_credentials(n),
+                "key_name": BACKEND_KEYS.get(n, ""),
+            }
             for n in BACKENDS
         ],
         "ai_available": enricher.enabled,
         "ai_provider": available_provider() or "none",
         "ephemeral_storage": EPHEMERAL,
     }
+
+
+@app.get("/api/system/health")
+def system_health():
+    """Capability report: configuration is not misrepresented as live health."""
+    from core.enrich import available_provider
+
+    def configured(key: str) -> bool:
+        return bool(os.environ.get(key))
+
+    sources = {
+        "brave": {
+            "configured": configured("BRAVE_API_KEY"),
+            "status": "degraded"
+            if configured("BRAVE_API_KEY")
+            else "missing_credentials",
+            "detail": "configured; live authentication is checked when queried",
+        },
+        "bluesky": {
+            "configured": configured("BLUESKY_HANDLE")
+            and configured("BLUESKY_APP_PASSWORD"),
+            "status": "degraded"
+            if configured("BLUESKY_HANDLE") and configured("BLUESKY_APP_PASSWORD")
+            else "missing_credentials",
+        },
+        "reddit": {
+            "configured": configured("REDDIT_CLIENT_ID")
+            and configured("REDDIT_CLIENT_SECRET"),
+            "status": "degraded"
+            if configured("REDDIT_CLIENT_ID") and configured("REDDIT_CLIENT_SECRET")
+            else "missing_credentials",
+        },
+        "x": {
+            "configured": configured("X_BEARER_TOKEN"),
+            "status": "degraded"
+            if configured("X_BEARER_TOKEN")
+            else "subscription_limited",
+        },
+        "tiktok": {
+            "configured": configured("TIKTOK_ACCESS_TOKEN"),
+            "status": "direct_api"
+            if configured("TIKTOK_ACCESS_TOKEN")
+            else ("web_index_only" if configured("BRAVE_API_KEY") else "unavailable"),
+        },
+        "duckduckgo": {
+            "configured": True,
+            "status": "degraded",
+            "detail": "unauthenticated provider; verified per investigation",
+        },
+    }
+    return {
+        "storage": {
+            "persistent": not EPHEMERAL,
+            "status": "operational" if not EPHEMERAL else "limited",
+            "backend": "sqlite",
+        },
+        "model": {
+            "provider": available_provider() or "none",
+            "status": "degraded" if available_provider() else "missing_credentials",
+            "detail": "verified when scoring runs",
+        },
+        "sources": sources,
+        "analyst_verdicts": {"enabled": not EPHEMERAL},
+    }
+
+
+@app.post("/api/investigations")
+async def create_investigation(payload: dict = Body(...)):
+    brand = str(payload.get("brand", "")).strip()
+    if not 2 <= len(brand) <= 100:
+        raise HTTPException(400, "brand must be between 2 and 100 characters")
+    from investigation.connectors import (
+        ConnectorHealth,
+        DiscoveryConnector,
+        DiscoveryResult,
+    )
+
+    class DuckDuckGoConnector(DiscoveryConnector):
+        name = "duckduckgo"
+
+        def is_configured(self):
+            return True
+
+        async def healthcheck(self):
+            return ConnectorHealth(
+                True,
+                "degraded",
+                detail="Unauthenticated provider; verified by this run",
+            )
+
+        async def search(self, q, context):
+            import osint_discovery
+
+            rows = await asyncio.to_thread(osint_discovery.search_duckduckgo, q, 10)
+            return [
+                DiscoveryResult(
+                    r.get("url", ""),
+                    r.get("title", ""),
+                    r.get("summary", ""),
+                    "duckduckgo",
+                    {"query": q},
+                )
+                for r in rows
+                if r.get("url")
+            ]
+
+    from investigation import InvestigationEngine
+
+    store = investigation_store()
+    try:
+        return await InvestigationEngine(store, [DuckDuckGoConnector()]).investigate(
+            brand, str(payload.get("query") or brand)
+        )
+    finally:
+        store.conn.close()
+
+
+@app.get("/api/investigations/{investigation_id}")
+def get_investigation(investigation_id: str):
+    store = investigation_store()
+    try:
+        row = store.get("investigations", investigation_id)
+    finally:
+        store.conn.close()
+    if not row:
+        raise HTTPException(404, "investigation not found")
+    for key in (
+        "requested_sources",
+        "successful_sources",
+        "limited_sources",
+        "failed_sources",
+        "unavailable_sources",
+        "config_snapshot",
+    ):
+        if row.get(key):
+            row[key] = json.loads(row[key])
+    return row
+
+
+@app.get("/api/investigations/{investigation_id}/graph")
+def get_investigation_graph(investigation_id: str):
+    store = investigation_store()
+    try:
+        if not store.get("investigations", investigation_id):
+            raise HTTPException(404, "investigation not found")
+        return store.graph(investigation_id)
+    finally:
+        store.conn.close()
+
+
+@app.get("/api/entities/{entity_id}")
+def get_entity(entity_id: str):
+    store = investigation_store()
+    try:
+        row = store.get("entities", entity_id)
+    finally:
+        store.conn.close()
+    if not row:
+        raise HTTPException(404, "entity not found")
+    row["metadata"] = json.loads(row.get("metadata") or "{}")
+    return row
+
+
+@app.get("/api/campaigns/{campaign_id}")
+def get_campaign(campaign_id: str):
+    store = investigation_store()
+    try:
+        row = store.get("campaigns", campaign_id)
+        if not row:
+            raise HTTPException(404, "campaign not found")
+        row["entities"] = [
+            dict(r)
+            for r in store.conn.execute(
+                "SELECT e.*,ce.relationship_strength FROM campaign_entities ce JOIN entities e ON e.id=ce.entity_id WHERE ce.campaign_id=?",
+                (campaign_id,),
+            )
+        ]
+        return row
+    finally:
+        store.conn.close()
+
+
+@app.get("/api/entities/{entity_id}/evidence")
+def get_entity_evidence(entity_id: str):
+    store = investigation_store()
+    try:
+        return {
+            "evidence": [
+                dict(r)
+                for r in store.conn.execute(
+                    "SELECT * FROM evidence WHERE entity_id=? ORDER BY observed_at",
+                    (entity_id,),
+                )
+            ]
+        }
+    finally:
+        store.conn.close()
+
+
+@app.post("/api/entities/{entity_id}/verdict")
+def submit_verdict(entity_id: str, payload: dict = Body(...)):
+    store = investigation_store()
+    try:
+        if not store.get("entities", entity_id):
+            raise HTTPException(404, "entity not found")
+        try:
+            return store.verdict(
+                entity_id,
+                str(payload.get("verdict", "")),
+                str(payload.get("comment", ""))[:2000],
+                str(payload.get("analyst_identifier", "analyst"))[:100],
+            )
+        except ValueError as exc:
+            raise HTTPException(400, str(exc))
+    finally:
+        store.conn.close()
 
 
 @app.get("/api/stats")
@@ -169,6 +411,7 @@ def stats():
 
 # ----------------------------------------------------------------- sweep
 
+
 @app.get("/api/sweep")
 def run_sweep(
     q: str = Query(..., min_length=2, max_length=200),
@@ -181,7 +424,9 @@ def run_sweep(
     max_ai: int = Query(25, ge=0, le=100),
 ):
     if save and EPHEMERAL:
-        raise HTTPException(409, "saved results require durable storage; set WATCHTOWER_DATA_DIR")
+        raise HTTPException(
+            409, "saved results require durable storage; set WATCHTOWER_DATA_DIR"
+        )
     cfg = config()
     backends = [s.strip() for s in sources.split(",") if s.strip()] or DEFAULT_BACKENDS
     unknown = [b for b in backends if b not in BACKENDS]
@@ -210,9 +455,16 @@ def run_sweep(
                     escalate_above=ec.get("escalate_above", 60),
                 )
             result = sweep(
-                q, fetcher, hours=hours, backends=backends, limit=limit,
-                fetch_bodies=fetch_bodies, enricher=enricher, max_enrich=max_ai,
-                budget=SWEEP_BUDGET, progress=events.put,
+                q,
+                fetcher,
+                hours=hours,
+                backends=backends,
+                limit=limit,
+                fetch_bodies=fetch_bodies,
+                enricher=enricher,
+                max_enrich=max_ai,
+                budget=SWEEP_BUDGET,
+                progress=events.put,
             )
             holder["result"] = result
         except Exception as e:
@@ -250,8 +502,7 @@ def run_sweep(
             "complete": result.complete,
             "scoring_error": result.scoring_error,
             "items": [
-                {**asdict(i), "band": report.band(i.relevance),
-                 "text": i.text[:600]}
+                {**asdict(i), "band": report.band(i.relevance), "text": i.text[:600]}
                 for i in result.items
             ],
         }
@@ -275,6 +526,7 @@ def run_sweep(
 
 # --------------------------------------------------------------- archive
 
+
 @app.get("/api/archive")
 def archive(q: str = Query(..., min_length=1), limit: int = Query(30, le=100)):
     cfg = config()
@@ -286,13 +538,20 @@ def archive(q: str = Query(..., min_length=1), limit: int = Query(30, le=100)):
         raise HTTPException(400, f"invalid search syntax: {e}")
     finally:
         store.close()
-    return {"items": [
-        {"title": r["title"], "url": r["url"], "source": r["source"],
-         "summary": r["summary"], "relevance": r["relevance"],
-         "band": report.band(r["relevance"]),
-         "published_at": r["published_at"]}
-        for r in rows
-    ]}
+    return {
+        "items": [
+            {
+                "title": r["title"],
+                "url": r["url"],
+                "source": r["source"],
+                "summary": r["summary"],
+                "relevance": r["relevance"],
+                "band": report.band(r["relevance"]),
+                "published_at": r["published_at"],
+            }
+            for r in rows
+        ]
+    }
 
 
 # -------------------------------------------------------------- scamscan
@@ -331,14 +590,20 @@ def scamscan_status():
     cfg = scamscan_config()
     _, tool_note = scamscan.web_search_tool(cfg)
     lex = cfg["lexicon"]
-    unverified = sum(1 for group in lex.values() for entry in group.values()
-                     if scamscan.term_weight(entry)[1] in ("", "UNVERIFIED"))
+    unverified = sum(
+        1
+        for group in lex.values()
+        for entry in group.values()
+        if scamscan.term_weight(entry)[1] in ("", "UNVERIFIED")
+    )
     which = scamscan.provider(cfg)
     con = scamscan.db_connect(str(data_path("scamscan.db")))
     try:
-        rows = dict(con.execute(
-            "SELECT disposition, COUNT(*) FROM findings GROUP BY disposition"
-        ).fetchall())
+        rows = dict(
+            con.execute(
+                "SELECT disposition, COUNT(*) FROM findings GROUP BY disposition"
+            ).fetchall()
+        )
     finally:
         con.close()
     return {
@@ -375,9 +640,11 @@ def scamscan_queue(
     if disposition not in allowed:
         raise HTTPException(400, f"disposition must be one of {sorted(allowed)}")
 
-    sql = ("SELECT fingerprint, score, scam_type, url, title, summary, evidence, "
-           "times_seen, disposition, analyst_note, first_seen, last_seen, breakdown "
-           "FROM findings WHERE score >= ?")
+    sql = (
+        "SELECT fingerprint, score, scam_type, url, title, summary, evidence, "
+        "times_seen, disposition, analyst_note, first_seen, last_seen, breakdown "
+        "FROM findings WHERE score >= ?"
+    )
     params = [min_score]
     if disposition != "all":
         sql += " AND disposition = ?"
@@ -392,26 +659,52 @@ def scamscan_queue(
         con.close()
 
     items = []
-    for (fp, score, stype, url, title, summary, evidence, seen, disp, note,
-         first, last, breakdown) in rows:
+    for (
+        fp,
+        score,
+        stype,
+        url,
+        title,
+        summary,
+        evidence,
+        seen,
+        disp,
+        note,
+        first,
+        last,
+        breakdown,
+    ) in rows:
         try:
             detail = json.loads(breakdown or "{}")
         except json.JSONDecodeError:
             detail = {}
-        items.append({
-            "fingerprint": fp, "score": score, "band": scam_band(score or 0, cfg),
-            "scam_type": stype, "url": url, "title": title, "summary": summary,
-            "evidence": evidence, "times_seen": seen, "disposition": disp,
-            "analyst_note": note, "first_seen": first, "last_seen": last,
-            "breakdown": detail,
-        })
+        items.append(
+            {
+                "fingerprint": fp,
+                "score": score,
+                "band": scam_band(score or 0, cfg),
+                "scam_type": stype,
+                "url": url,
+                "title": title,
+                "summary": summary,
+                "evidence": evidence,
+                "times_seen": seen,
+                "disposition": disp,
+                "analyst_note": note,
+                "first_seen": first,
+                "last_seen": last,
+                "breakdown": detail,
+            }
+        )
     return {"items": items, "ephemeral_storage": EPHEMERAL}
 
 
 @app.post("/api/scamscan/dispose")
 def scamscan_dispose(payload: dict = Body(...)):
     if EPHEMERAL:
-        raise HTTPException(409, "analyst verdicts require durable storage; set WATCHTOWER_DATA_DIR")
+        raise HTTPException(
+            409, "analyst verdicts require durable storage; set WATCHTOWER_DATA_DIR"
+        )
     verdicts = {"confirmed", "false_positive", "unclear", "escalated", "new"}
     fingerprint = str(payload.get("fingerprint", "")).strip()
     verdict = str(payload.get("verdict", "")).strip()
@@ -425,7 +718,8 @@ def scamscan_dispose(payload: dict = Body(...)):
     try:
         cur = con.execute(
             "UPDATE findings SET disposition=?, analyst_note=? WHERE fingerprint=?",
-            (verdict, note, fingerprint))
+            (verdict, note, fingerprint),
+        )
         con.commit()
         if not cur.rowcount:
             raise HTTPException(404, "no finding with that fingerprint")
@@ -469,12 +763,16 @@ def scamscan_hunt(topics: int = Query(1, ge=1, le=20)):
     so `topics` is capped and the UI states the ceiling before you click.
     """
     if EPHEMERAL:
-        raise HTTPException(409, "hunts require durable storage so findings and verdicts are retained")
+        raise HTTPException(
+            409, "hunts require durable storage so findings and verdicts are retained"
+        )
     cfg = scamscan_config()
     which = scamscan.provider(cfg)
     if not which:
-        raise HTTPException(503, "No model API key — set GEMINI_API_KEY "
-                                 "(free tier) or ANTHROPIC_API_KEY")
+        raise HTTPException(
+            503,
+            "No model API key — set GEMINI_API_KEY (free tier) or ANTHROPIC_API_KEY",
+        )
 
     events: queue.Queue = queue.Queue()
     holder: dict = {}
@@ -484,7 +782,8 @@ def scamscan_hunt(topics: int = Query(1, ge=1, le=20)):
         try:
             con = scamscan.db_connect(str(data_path("scamscan.db")))
             holder["summary"] = scamscan.hunt(
-                scamscan.make_client(which), cfg, con, topics, events.put)
+                scamscan.make_client(which), cfg, con, topics, events.put
+            )
         except Exception as e:
             holder["error"] = f"{type(e).__name__}: {e}"
         finally:
@@ -524,19 +823,18 @@ def scamscan_hunt(topics: int = Query(1, ge=1, le=20)):
 def scan_url(payload: dict = Body(...)):
     """Scan a single URL and return structured results for the new UI."""
     import osint_discovery
-    from urllib.parse import urlparse
-    
+
     url = str(payload.get("url", "")).strip()
     if not url:
         raise HTTPException(400, "URL is required")
-    
+
     cfg = scamscan_config()
-    
+
     def _compute_confidence(scored: dict) -> float:
         """Compute confidence based on evidence completeness."""
         signals_present = 0
         total_signals = 5
-        
+
         if scored.get("lexicon_score", 0) > 0:
             signals_present += 1
         if scored.get("impersonation_score", 0) > 0:
@@ -545,26 +843,26 @@ def scan_url(payload: dict = Body(...)):
             signals_present += 1
         if scored.get("model_score") is not None:
             signals_present += 1
-        
+
         # Infrastructure flags count as evidence
         infra = scored.get("infrastructure_flags", {})
         if infra:
             signals_present += 0.5
-        
+
         # Base confidence from signal coverage
         base_conf = signals_present / total_signals
-        
+
         # Boost confidence when strong signals are present
         imp_score = scored.get("impersonation_score", 0)
         if imp_score >= 70:
             base_conf = max(base_conf, 0.8)  # High confidence in strong impersonation
-        
+
         return min(1.0, base_conf)
-    
+
     # Fetch and analyze the URL using existing scamscan logic
     try:
         finding = osint_discovery.fetch_and_analyze_url(url, cfg)
-        
+
         # Check for official domain (INSTANT SAFE)
         if finding.get("_is_official"):
             return {
@@ -572,10 +870,12 @@ def scan_url(payload: dict = Body(...)):
                 "score": 0,
                 "classification": "SAFE",
                 "verdict": "VERIFIED_OFFICIAL",
-                "findings": [f"Verified official domain ({finding.get('_official_domain')})"],
-                "breakdown": {"official_domain": finding.get("_official_domain")}
+                "findings": [
+                    f"Verified official domain ({finding.get('_official_domain')})"
+                ],
+                "breakdown": {"official_domain": finding.get("_official_domain")},
             }
-        
+
         # Check for smoking gun (INSTANT SCAM)
         if finding.get("_smoking_gun"):
             return {
@@ -584,41 +884,47 @@ def scan_url(payload: dict = Body(...)):
                 "classification": "ADVANCE_FEE_SCAM",
                 "verdict": "CONFIRMED_SCAM",
                 "findings": [finding["_smoking_gun_reason"]],
-                "breakdown": {"smoking_gun": True}
+                "breakdown": {"smoking_gun": True},
             }
-        
+
         # Score the finding normally if no override
         scored = scamscan.score_finding(finding, cfg)
-        
+
         # Format findings list with explainable evidence
         findings_list = []
         if scored.get("lexicon_score", 0) > 0:
             findings_list.append(f"Lexicon match: +{scored['lexicon_score']} points")
         if scored.get("impersonation_score", 0) > 0:
-            findings_list.append(f"Impersonation detected: +{scored['impersonation_score']} points")
+            findings_list.append(
+                f"Impersonation detected: +{scored['impersonation_score']} points"
+            )
         if scored.get("artifact_score", 0) > 0:
-            findings_list.append(f"Suspicious artifacts: +{scored['artifact_score']} points")
-        
+            findings_list.append(
+                f"Suspicious artifacts: +{scored['artifact_score']} points"
+            )
+
         # Add infrastructure flags as evidence
         infra_flags = scored.get("infrastructure_flags", {})
         if infra_flags.get("on_free_host"):
-            findings_list.append("Hosted on free platform commonly used for scams (Vercel/Netlify/etc)")
-            
+            findings_list.append(
+                "Hosted on free platform commonly used for scams (Vercel/Netlify/etc)"
+            )
+
         # Add specific evidence
         if finding.get("quoted_evidence"):
             evidence_text = finding["quoted_evidence"][:500]
             if evidence_text:
                 findings_list.append(f"Evidence: {evidence_text}")
-        
+
         # Add impersonation reason
         if scored.get("impersonation_reason"):
             findings_list.append(f"Why: {scored['impersonation_reason']}")
-        
+
         # Determine verdict based on score with improved thresholds
         # Using evidence-based categories instead of simple thresholds
         score = scored["score"]
         imp_score = scored.get("impersonation_score", 0)
-        
+
         # Verdict logic based on evidence strength
         if score >= 80 or imp_score >= 85:
             verdict = "HIGH_RISK"
@@ -635,7 +941,7 @@ def scan_url(payload: dict = Body(...)):
         else:
             verdict = "UNKNOWN"
             classification = "Insufficient Evidence"
-        
+
         return {
             "url": url,
             "score": score,
@@ -643,9 +949,9 @@ def scan_url(payload: dict = Body(...)):
             "verdict": verdict,
             "findings": findings_list,
             "breakdown": scored,
-            "confidence": _compute_confidence(scored)  # Add confidence metric
+            "confidence": _compute_confidence(scored),  # Add confidence metric
         }
-        
+
     except Exception as e:
         raise HTTPException(500, f"Analysis failed: {str(e)}")
 
@@ -654,7 +960,7 @@ def scan_url(payload: dict = Body(...)):
 def discover_scams(payload: dict = Body(...)):
     """OSINT discovery endpoint for hunting scam sites - uses proven DuckDuckGo search."""
     import osint_discovery
-    
+
     brand = str(payload.get("brand", "fuliza")).strip().lower()
     if len(brand) < 2 or len(brand) > 80:
         raise HTTPException(400, "brand must be between 2 and 80 characters")
@@ -663,13 +969,17 @@ def discover_scams(payload: dict = Body(...)):
     except (TypeError, ValueError):
         raise HTTPException(400, "limit must be a number")
     limit = max(1, min(limit, 20))  # Cap between 1-20
-    
+
     cfg = scamscan_config()
-    
+
     try:
         # Use the proven OSINT discovery module with DuckDuckGo
-        results = osint_discovery.discover_and_score(brand, limit, cfg)
-        
+        discovery = osint_discovery.discover_and_score(
+            brand, limit, cfg, include_diagnostics=True
+        )
+        results = discovery["results"]
+        coverage = discovery["coverage"]
+
         # Format results for UI with enhanced data
         formatted_results = []
         review = cfg.get("scoring", {}).get("review_threshold", 45)
@@ -682,27 +992,49 @@ def discover_scams(payload: dict = Body(...)):
                 classification = "Needs review"
             else:
                 classification = "Weak signal"
-            formatted_results.append({
-                "url": item.get("url", ""),
-                "brand": brand,
-                "score": score,
-                "classification": classification,
-                "title": item.get("title", ""),
-                "summary": item.get("summary", ""),
-                "source": item.get("source", "duckduckgo"),
-                "findings": [
-                    f"Score: {score:.1f}/100",
-                    f"Found via: {item.get('source', 'search')}",
-                ],
-                "breakdown": item.get("breakdown", {}),
-            })
-        
+            formatted_results.append(
+                {
+                    "url": item.get("url", ""),
+                    "brand": brand,
+                    "score": score,
+                    "classification": classification,
+                    "title": item.get("title", ""),
+                    "summary": item.get("summary", ""),
+                    "source": item.get("source", "duckduckgo"),
+                    "findings": [
+                        f"Score: {score:.1f}/100",
+                        f"Found via: {item.get('source', 'search')}",
+                    ],
+                    "breakdown": item.get("breakdown", {}),
+                }
+            )
+
+        if formatted_results:
+            message = (
+                f"Identified {len(formatted_results)} qualifying candidate(s) "
+                "within the DuckDuckGo results searched in this run."
+            )
+        elif coverage["raw_results"] == 0:
+            message = (
+                f"DuckDuckGo completed {coverage['queries_succeeded']} of "
+                f"{coverage['queries_planned']} planned queries but returned no "
+                "indexed results. Try a broader brand alias or retry later."
+            )
+        else:
+            message = (
+                "No qualifying scam candidates were identified within the "
+                f"{coverage['brand_relevant_results']} brand-relevant results "
+                "returned by DuckDuckGo in this run."
+            )
+
         return {
-            "results": formatted_results, 
+            "results": formatted_results,
             "count": len(formatted_results),
-            "method": "duckduckgo_search"
+            "method": "duckduckgo_search",
+            "coverage": coverage,
+            "message": message,
         }
-        
+
     except Exception as e:
         logger.error(f"Discovery error: {e}")
         raise HTTPException(500, f"Discovery failed: {str(e)}")
@@ -712,47 +1044,58 @@ def discover_scams(payload: dict = Body(...)):
 async def discover_scams_experimental(payload: dict = Body(...)):
     """Experimental async OSINT discovery - faster but may be blocked by search engines."""
     import watchtower_async
-    
+
     brand = str(payload.get("brand", "fuliza")).strip().lower()
     limit = int(payload.get("limit", 10))
     timeout = int(payload.get("timeout", 20))
-    
+
     cfg = scamscan_config()
-    
+
     try:
         wt_config = {
-            'brand_aliases': cfg.get('brand', {}).get('aliases', [brand]),
-            'suspicious_keywords': list(cfg.get('lexicon', {}).get('advance_fee_scam', {}).keys())[:3],
-            'free_hosting_domains': ["vercel.app", "netlify.app", "firebaseapp.com", "github.io"]
+            "brand_aliases": cfg.get("brand", {}).get("aliases", [brand]),
+            "suspicious_keywords": list(
+                cfg.get("lexicon", {}).get("advance_fee_scam", {}).keys()
+            )[:3],
+            "free_hosting_domains": [
+                "vercel.app",
+                "netlify.app",
+                "firebaseapp.com",
+                "github.io",
+            ],
         }
-        
+
         engine = watchtower_async.WatchtowerEngine(wt_config)
-        raw_results = await engine.run_sweep(max_results=limit * 2, timeout_seconds=timeout)
-        
+        raw_results = await engine.run_sweep(
+            max_results=limit * 2, timeout_seconds=timeout
+        )
+
         # Score discovered URLs
         scored_results = []
-        for item in raw_results.get('results', []):
-            url = item.get('url', '')
+        for item in raw_results.get("results", []):
+            url = item.get("url", "")
             if not url:
                 continue
-            scored_results.append({
-                'url': url,
-                'brand': brand,
-                'score': item.get('confidence', 0) * 100,
-                'title': item.get('title', ''),
-                'source': item.get('source', 'unknown'),
-                'confidence': item.get('confidence', 0)
-            })
-        
-        scored_results.sort(key=lambda x: x['score'], reverse=True)
-        
+            scored_results.append(
+                {
+                    "url": url,
+                    "brand": brand,
+                    "score": item.get("confidence", 0) * 100,
+                    "title": item.get("title", ""),
+                    "source": item.get("source", "unknown"),
+                    "confidence": item.get("confidence", 0),
+                }
+            )
+
+        scored_results.sort(key=lambda x: x["score"], reverse=True)
+
         return {
-            'results': scored_results[:limit],
-            'count': len(scored_results[:limit]),
-            'time_taken': raw_results.get('time_taken', 0),
-            'method': 'async_multi_source'
+            "results": scored_results[:limit],
+            "count": len(scored_results[:limit]),
+            "time_taken": raw_results.get("time_taken", 0),
+            "method": "async_multi_source",
         }
-        
+
     except Exception as e:
         logger.error(f"Async discovery error: {e}")
         raise HTTPException(500, f"Discovery failed: {str(e)}")

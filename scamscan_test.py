@@ -136,7 +136,13 @@ def main():
     ok &= check("short aliases do not match inside unrelated hostnames",
                 impersonation_score("https://safety.example", CFG["brand"])[0] == 0)
     ok &= check("short aliases still match as a deliberate DNS label",
-                impersonation_score("https://kcb.login.example", CFG["brand"])[0] > 0)
+                impersonation_score("https://saf.login.example", CFG["brand"])[0] > 0)
+    ok &= check("a real competing institution is never an M-PESA alias",
+                impersonation_score("https://kcb.co.ke", CFG["brand"])[0] == 0)
+    contaminated = {**CFG["brand"],
+                    "aliases": [*CFG["brand"]["aliases"], "kcb"]}
+    ok &= check("excluded brands override an accidentally duplicated alias",
+                impersonation_score("https://kcb.login.example", contaminated)[0] == 0)
 
     print("\nhost infrastructure ratings")
     hosted = {"url": "fuliza-limit.vercel.app", "summary": ""}
@@ -193,6 +199,26 @@ def main():
                 and discovered[0]["breakdown"]["lexicon_score"] > 0)
     ok &= check("one brand search does not mutate later searches",
                 CFG["brand"] == original_brand)
+
+    original_search = osint_discovery.search_duckduckgo
+    try:
+        osint_discovery._SEARCH_CACHE.clear()
+        osint_discovery.search_duckduckgo = lambda query, max_results=10: [{
+            "url": "https://weather.example/today",
+            "title": "Weather forecast",
+            "summary": "Sunny with light winds",
+            "source": "test-search",
+        }]
+        try:
+            discover_and_score("fuliza", 1, CFG)
+            irrelevant_failed_closed = False
+        except osint_discovery.DiscoveryError as exc:
+            irrelevant_failed_closed = "not a clean scan" in str(exc)
+    finally:
+        osint_discovery.search_duckduckgo = original_search
+        osint_discovery._SEARCH_CACHE.clear()
+    ok &= check("totally irrelevant provider results fail closed",
+                irrelevant_failed_closed)
 
     print("\nlexicon")
     hits, _ = lexicon_score("guaranteed returns, double your money", CFG["lexicon"])
