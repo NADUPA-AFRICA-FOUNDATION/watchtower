@@ -97,6 +97,31 @@ fall back to keyword-overlap ranking. Scoring runs on **Gemini or Anthropic** â€
 whichever key is set, Gemini first because it has a free tier. `python run.py
 models` lists what your key can reach.
 
+### Public social discovery with snscrape
+
+The **Discover** view searches DuckDuckGo and, when the `snscrape` executable
+is installed, public Twitter/X and Reddit posts concurrently. Watchtower does
+not treat a post as malicious: it extracts external links from public posts,
+deduplicates them against web-search results, applies the existing brand and
+trusted-domain safeguards, and preserves the post URL as discovery provenance.
+
+`snscrape` is installed by `setup.sh`/`requirements.txt`. Its platform scrapers
+can break when a provider changes public endpoints; such failures are reported
+as `limited` or `unavailable` in discovery coverage and never abort the other
+sources. Tune or disable it under `discovery.snscrape` in `config.json`:
+
+```json
+{
+  "enabled": true,
+  "scrapers": ["twitter-search", "reddit-search"],
+  "max_results_per_scraper": 20,
+  "timeout_seconds": 20
+}
+```
+
+Only public results are queried. Watchtower does not authenticate to accounts,
+bypass access controls, execute page code, or submit forms through snscrape.
+
 ## What a sweep does
 
 ```

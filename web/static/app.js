@@ -671,8 +671,21 @@ $("#discover-form").onsubmit = async (e) => {
     summary.append(el("span", "warn", "review before acting"));
     if (!d.results.length) {
       const empty = el("div", "empty-inline");
-      empty.append(el("h3", null, "No candidates returned"),
-        el("p", null, "This only describes this search run; it does not establish that the brand is clean."));
+      const coverage = d.coverage || {};
+      empty.append(
+        el("h3", null, "No qualifying candidates in this run"),
+        el("p", null, d.message ||
+          "No qualifying candidates were identified within the sources successfully searched."),
+        el("p", "card-meta",
+          `${coverage.queries_succeeded || 0}/${coverage.queries_planned || 0} queries completed · ` +
+          `${coverage.raw_results || 0} raw results · ` +
+          `${coverage.brand_relevant_results || 0} brand-relevant results`),
+        el("p", "card-meta",
+          `Social scraping: ${coverage.snscrape_status || "unavailable"} · ` +
+          `${coverage.snscrape_linked_sites || 0} linked sites discovered`),
+        el("p", "hint",
+          "This is limited to the public web and social sources completed in this run and does not establish that the brand is clean."),
+      );
       out.replaceChildren(empty);
     } else {
       out.replaceChildren(...d.results.map(discoveryCard));
