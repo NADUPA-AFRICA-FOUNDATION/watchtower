@@ -2,6 +2,14 @@
   "discovery": {
     "query_budget": 5,
     "search_concurrency": 5,
+    "cache_ttl_seconds": 300,
+    "snscrape": {
+      "enabled": true,
+      "scrapers": ["twitter-search", "reddit-search"],
+      "max_results_per_scraper": 20,
+      "timeout_seconds": 20,
+      "executable": "snscrape"
+    }
     "cache_ttl_seconds": 300
   },
   "brand": {

@@ -20,6 +20,7 @@ import os
 import queue
 import secrets
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict
 from pathlib import Path
 
@@ -187,6 +188,7 @@ def list_sources():
 def system_health():
     """Capability report: configuration is not misrepresented as live health."""
     from core.enrich import available_provider
+    import shutil
 
     def configured(key: str) -> bool:
         return bool(os.environ.get(key))
@@ -229,6 +231,11 @@ def system_health():
             "configured": True,
             "status": "degraded",
             "detail": "unauthenticated provider; verified per investigation",
+        },
+        "snscrape": {
+            "configured": bool(shutil.which("snscrape")),
+            "status": "degraded" if shutil.which("snscrape") else "unavailable",
+            "detail": "public social scraping; each platform is verified per run",
         },
     }
     return {
@@ -973,6 +980,91 @@ def discover_scams(payload: dict = Body(...)):
     cfg = scamscan_config()
 
     try:
+        # DuckDuckGo and public social-post discovery are independent sources;
+        # run them together so adding snscrape does not double page latency.
+        import snscrape_discovery
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            web_future = pool.submit(
+                osint_discovery.discover_and_score,
+                brand,
+                limit,
+                cfg,
+                True,
+            )
+            social_future = pool.submit(
+                snscrape_discovery.discover_linked_sites,
+                brand,
+                cfg.get("discovery", {}).get("snscrape", {}),
+            )
+            try:
+                discovery = web_future.result()
+            except Exception as exc:
+                planned = int(cfg.get("discovery", {}).get("query_budget", 5))
+                discovery = {
+                    "results": [],
+                    "coverage": {
+                        "provider": "duckduckgo",
+                        "queries_planned": planned,
+                        "queries_succeeded": 0,
+                        "queries_failed": planned,
+                        "raw_results": 0,
+                        "brand_relevant_results": 0,
+                        "qualifying_candidates": 0,
+                        "failures": [f"{type(exc).__name__}: {exc}"[:300]],
+                    },
+                }
+            try:
+                social_discovery = social_future.result()
+            except Exception as exc:
+                social_discovery = {
+                    "results": [],
+                    "status": "unavailable",
+                    "runs": [
+                        {
+                            "source": "snscrape",
+                            "status": "provider_error",
+                            "detail": type(exc).__name__,
+                        }
+                    ],
+                }
+
+        results = discovery["results"]
+        coverage = discovery["coverage"]
+        coverage["snscrape_status"] = social_discovery["status"]
+        coverage["snscrape_runs"] = social_discovery["runs"]
+
+        from core.trusted_domains import is_trusted_domain
+        from urllib.parse import urlparse
+
+        web_urls = {item.get("url") for item in results}
+        known_urls = set(web_urls)
+        social_cfg = json.loads(json.dumps(cfg))
+        social_cfg["brand"]["name"] = brand
+        social_cfg["brand"]["aliases"] = list(
+            dict.fromkeys([brand, *social_cfg["brand"].get("aliases", [])])
+        )
+        social_relevance = osint_discovery._relevance_tokens(social_cfg)
+        for item in social_discovery["results"]:
+            url = item.get("url", "")
+            if (
+                not url
+                or url in known_urls
+                or is_trusted_domain((urlparse(url).hostname or "").lower())
+            ):
+                continue
+            if not osint_discovery._looks_relevant(item, social_relevance):
+                continue
+            scored = osint_discovery.evaluate_url(
+                url, item.get("title", ""), item.get("summary", ""), social_cfg
+            )
+            results.append(
+                {**item, "score": scored.get("score", 0), "breakdown": scored}
+            )
+            known_urls.add(url)
+            if len(results) >= limit:
+                break
+        coverage["snscrape_linked_sites"] = len(known_urls - web_urls)
         # Use the proven OSINT discovery module with DuckDuckGo
 
 
@@ -1005,11 +1097,38 @@ def discover_scams(payload: dict = Body(...)):
                 }
             )
 
+        if formatted_results:
+            message = (
+                f"Identified {len(formatted_results)} qualifying candidate(s) "
+                "within the public web and social sources searched in this run."
+            )
+        elif not coverage["queries_succeeded"] and coverage["snscrape_status"] in {
+            "unavailable",
+            "disabled",
+        }:
+            message = (
+                "No discovery source completed successfully. Review the source "
+                "coverage details, install/repair snscrape, and retry later."
+            )
+        elif coverage["raw_results"] == 0:
+            message = (
+                f"DuckDuckGo completed {coverage['queries_succeeded']} of "
+                f"{coverage['queries_planned']} planned queries but returned no "
+                "indexed results. Try a broader brand alias or retry later."
+            )
+        else:
+            message = (
+                "No qualifying scam candidates were identified within the "
+                f"{coverage['brand_relevant_results']} brand-relevant results "
+                "returned by DuckDuckGo in this run."
+            )
 
         return {
             "results": formatted_results,
             "count": len(formatted_results),
             "method": "duckduckgo_search",
+            "coverage": coverage,
+            "message": message,
 
         }
 

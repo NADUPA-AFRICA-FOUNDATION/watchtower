@@ -11,6 +11,7 @@ dependencies = [
     "anthropic>=0.40",
     "fastapi>=0.115",
     "uvicorn>=0.30",
+    "snscrape>=0.7.0.20230622",
 ]
 
 # The app object lives in web/app.py, which is not one of the locations Vercel

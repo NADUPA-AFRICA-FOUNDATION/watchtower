@@ -680,6 +680,11 @@ $("#discover-form").onsubmit = async (e) => {
           `${coverage.queries_succeeded || 0}/${coverage.queries_planned || 0} queries completed · ` +
           `${coverage.raw_results || 0} raw results · ` +
           `${coverage.brand_relevant_results || 0} brand-relevant results`),
+        el("p", "card-meta",
+          `Social scraping: ${coverage.snscrape_status || "unavailable"} · ` +
+          `${coverage.snscrape_linked_sites || 0} linked sites discovered`),
+        el("p", "hint",
+          "This is limited to the public web and social sources completed in this run and does not establish that the brand is clean."),
         el("p", "hint",
           "This is limited to DuckDuckGo's indexed results for this run and does not establish that the brand is clean."),
       );

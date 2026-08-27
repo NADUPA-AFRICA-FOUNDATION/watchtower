@@ -542,6 +542,7 @@ def discover_and_score(brand, limit, cfg, include_diagnostics=False):
         [brand] + cfg["brand"].get("aliases", [])))
     
     queries = generate_queries(brand_cfg, brand_keyword=brand)
+    relevance_tokens = _relevance_tokens(brand_cfg)
 
     discovery_cfg = cfg.get("discovery", {})
     # Five selected queries cover every discovery family. Previously ten
@@ -567,6 +568,7 @@ def discover_and_score(brand, limit, cfg, include_diagnostics=False):
             failures.append(str(error))
             continue
         searched += 1
+        raw_count += len(search_results)
 
         
         for result in search_results:
