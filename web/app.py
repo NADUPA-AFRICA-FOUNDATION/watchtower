@@ -974,11 +974,7 @@ def discover_scams(payload: dict = Body(...)):
 
     try:
         # Use the proven OSINT discovery module with DuckDuckGo
-        discovery = osint_discovery.discover_and_score(
-            brand, limit, cfg, include_diagnostics=True
-        )
-        results = discovery["results"]
-        coverage = discovery["coverage"]
+
 
         # Format results for UI with enhanced data
         formatted_results = []
@@ -1009,30 +1005,12 @@ def discover_scams(payload: dict = Body(...)):
                 }
             )
 
-        if formatted_results:
-            message = (
-                f"Identified {len(formatted_results)} qualifying candidate(s) "
-                "within the DuckDuckGo results searched in this run."
-            )
-        elif coverage["raw_results"] == 0:
-            message = (
-                f"DuckDuckGo completed {coverage['queries_succeeded']} of "
-                f"{coverage['queries_planned']} planned queries but returned no "
-                "indexed results. Try a broader brand alias or retry later."
-            )
-        else:
-            message = (
-                "No qualifying scam candidates were identified within the "
-                f"{coverage['brand_relevant_results']} brand-relevant results "
-                "returned by DuckDuckGo in this run."
-            )
 
         return {
             "results": formatted_results,
             "count": len(formatted_results),
             "method": "duckduckgo_search",
-            "coverage": coverage,
-            "message": message,
+
         }
 
     except Exception as e:
