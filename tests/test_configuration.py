@@ -20,3 +20,8 @@ def test_watchtower_yaml_has_no_merge_markers_and_keeps_discovery_limits():
         "twitter-search",
         "reddit-search",
     ]
+    assert config["discovery"] == {
+        "query_budget": 5,
+        "search_concurrency": 5,
+        "cache_ttl_seconds": 300,
+    }

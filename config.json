@@ -10,6 +10,7 @@
       "timeout_seconds": 20,
       "executable": "snscrape"
     }
+    "cache_ttl_seconds": 300
   },
   "brand": {
     "name": "M-PESA",

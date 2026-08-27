@@ -1065,6 +1065,8 @@ def discover_scams(payload: dict = Body(...)):
             if len(results) >= limit:
                 break
         coverage["snscrape_linked_sites"] = len(known_urls - web_urls)
+        # Use the proven OSINT discovery module with DuckDuckGo
+
 
         # Format results for UI with enhanced data
         formatted_results = []
@@ -1127,6 +1129,7 @@ def discover_scams(payload: dict = Body(...)):
             "method": "duckduckgo_search",
             "coverage": coverage,
             "message": message,
+
         }
 
     except Exception as e:

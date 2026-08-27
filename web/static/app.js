@@ -685,6 +685,8 @@ $("#discover-form").onsubmit = async (e) => {
           `${coverage.snscrape_linked_sites || 0} linked sites discovered`),
         el("p", "hint",
           "This is limited to the public web and social sources completed in this run and does not establish that the brand is clean."),
+        el("p", "hint",
+          "This is limited to DuckDuckGo's indexed results for this run and does not establish that the brand is clean."),
       );
       out.replaceChildren(empty);
     } else {
