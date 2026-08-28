@@ -25,13 +25,10 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from urllib.parse import quote_plus
 
-try:
-    from ddgs import DDGS
-except ImportError:
-    try:
-        from duckduckgo_search import DDGS
-    except ImportError:
-        DDGS = None
+from discovery.providers.web_search import (
+    WebSearchError,
+    search_duckduckgo as _search_duckduckgo,
+)
 
 # Import from scamscan module
 from scamscan import (
@@ -249,39 +246,11 @@ def select_queries(queries, limit=10):
 
 
 def search_duckduckgo(query, max_results=10):
-    """Search DuckDuckGo and return results."""
-    if DDGS is None:
-        raise DiscoveryError(
-            "DuckDuckGo search is unavailable; install the 'ddgs' dependency")
-    
+    """Compatibility wrapper for the provider-based DuckDuckGo search."""
     try:
-        results = []
-        with DDGS() as ddgs:
-            # DuckDuckGo search
-            search_results = list(ddgs.text(query, max_results=max_results))
-            
-            for r in search_results:
-                if isinstance(r, dict):
-                    results.append({
-                        "title": r.get("title", ""),
-                        "url": r.get("href", r.get("url", "")),
-                        "summary": r.get("body", r.get("snippet", "")),
-                        "source": "duckduckgo",
-                        "query": query,
-                    })
-                elif isinstance(r, str):
-                    # Some versions return just URLs
-                    results.append({
-                        "title": "",
-                        "url": r,
-                        "summary": "",
-                        "source": "duckduckgo",
-                        "query": query,
-                    })
-        
-        return results
-    except Exception as e:
-        raise DiscoveryError(f"DuckDuckGo search failed for query {query!r}: {e}") from e
+        return _search_duckduckgo(query, max_results)
+    except WebSearchError as exc:
+        raise DiscoveryError(str(exc)) from exc
 
 
 def _cached_search(query, max_results, ttl_seconds=_SEARCH_CACHE_TTL):
